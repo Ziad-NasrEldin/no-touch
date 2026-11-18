@@ -15,10 +15,24 @@ let package = Package(
         .library(name: "PhoneStorage", targets: ["PhoneStorage"]),
         .library(name: "PhoneIntegration", targets: ["PhoneIntegration"])
     ],
+    dependencies: [
+        // A1 §4.1 exact registrations — iOS/macOS-only model stacks, bound
+        // to the PhoneAI target only (watch targets must never pull these).
+        .package(url: "https://github.com/argmaxinc/argmax-oss-swift.git", from: "1.1.1"),
+        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", .upToNextMinor(from: "2.31.3"))
+    ],
     targets: [
         .target(name: "RecorderContracts"),
         .target(name: "WatchCapture", dependencies: ["RecorderContracts"]),
-        .target(name: "PhoneAI", dependencies: ["RecorderContracts"]),
+        .target(
+            name: "PhoneAI",
+            dependencies: [
+                "RecorderContracts",
+                .product(name: "WhisperKit", package: "argmax-oss-swift"),
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm")
+            ]
+        ),
         .target(name: "PhoneStorage", dependencies: ["RecorderContracts"]),
         .target(
             name: "PhoneIntegration",

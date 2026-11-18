@@ -59,3 +59,59 @@ public protocol TextIntelligenceAdapterProtocol: Sendable {
     func proposeConversationGroups(sessionID: UUID, segments: [TranscriptSegment]) async throws -> [ConversationGroup]
     func generateMetadata(conversationID: UUID, segments: [TranscriptSegment]) async throws -> GeneratedConversationMetadata
 }
+
+/// I1 (Phase 2): promoted store APIs beyond the frozen receive/analyze
+/// boundary — adopted from S1's contract request so app/integration code
+/// binds a protocol, not `SQLiteArchiveStore` concretely. Everything here is
+/// additive over `ConversationArchiveStoreProtocol`; semantics unchanged.
+public protocol ExtendedArchiveStoreProtocol: ConversationArchiveStoreProtocol {
+    /// Session-truth mirror (fed by the watch→phone session channel).
+    func upsertSession(_ session: RecordingSession) async throws
+    func session(id: UUID) async throws -> RecordingSession?
+    func sessions() async throws -> [RecordingSession]
+    /// Override surface: reads resolve generated output through user edits.
+    func userOverrides(conversationID: UUID) async throws -> [UserOverrideRecord]
+    func hasUserOverride(conversationID: UUID, field: UserOverrideRecord.Field) async throws -> Bool
+    func generatedMetadata(conversationID: UUID) async throws -> GeneratedConversationMetadata?
+    func effectiveMetadata(conversationID: UUID) async throws -> GeneratedConversationMetadata?
+    /// Job inspection (queued/failed/cancelled states for resume + status UI).
+    func analysisJobs(state: AnalysisJobState?) async throws -> [AnalysisJob]
+    /// Playable file for a stored chunk; nil when expired/deleted/missing.
+    func audioFileURL(chunkID: UUID) async throws -> URL?
+    /// Local ar+en search foundation.
+    func searchTranscripts(query: String, limit: Int) async throws -> [TranscriptSearchHit]
+    /// Raw-audio retention sweep; returns how many chunk files expired.
+    func enforceRetention(_ policy: RetentionPolicy, now: Date) async throws -> Int
+    /// Deletion propagation to the watch outbox.
+    func unpropagatedDeletionIntents() async throws -> [DeletionIntent]
+    func markDeletionIntentsPropagated(_ ids: [UUID]) async throws
+    /// Structured non-content evidence export (Gate A).
+    func diagnosticsReport(deviceModel: String, osVersion: String, limit: Int) async throws -> DiagnosticsReport
+
+    // MARK: - I1 integration reads (added with the promotion)
+
+    /// All live transcript segments of a session, ordered by chunk sequence
+    /// then media time — the input regrouping needs across chunk boundaries.
+    func transcriptSegments(sessionID: UUID) async throws -> [TranscriptSegment]
+    /// Registry lookup for a received chunk (nil when never stored).
+    func chunkMetadata(id: UUID) async throws -> AudioChunkMetadata?
+    /// Session ids that currently hold `stored` chunk rows — drives the
+    /// missed-enqueue reconciliation without needing mirrored session rows.
+    func sessionIDsWithStoredChunks() async throws -> [UUID]
+    /// Session ids holding segments no group currently claims — drives
+    /// regroup convergence after crashes or deletion reshuffles.
+    func sessionIDsWithUngroupedSegments() async throws -> [UUID]
+    /// Regroup bookkeeping (NOT user deletion): removes a group + its
+    /// membership + generated metadata + pending jobs without tombstoning,
+    /// so a reshuffled proposal can reuse the span legitimately.
+    func disbandConversationGroup(conversationID: UUID) async throws
+}
+
+/// I1 (Phase 2): formalizes the file-delivery ingest seam S1 asked about.
+/// `PhoneReceiveService` already implements it; transports (`WCSession`
+/// file callbacks or alternates) can bind this instead of the concrete type.
+public protocol PhoneFileIngestProtocol: PhoneReceiveServiceProtocol {
+    /// Consumes an already-on-disk delivery: tombstone check → dedup →
+    /// streaming verify → atomic move → registry → ack.
+    func ingestReceivedFile(at url: URL, metadata: AudioChunkMetadata) async throws -> TransferAcknowledgment
+}
