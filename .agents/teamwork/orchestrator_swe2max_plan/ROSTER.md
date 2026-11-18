@@ -5,7 +5,7 @@ Maximum concurrent workers: `3`.
 
 | Role | Title | Task ID | Thread Link | Base Commit | Output Commit | Status | Handoff / State Dir | Next Instruction |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `F0` | F0 — Foundation and shared contracts | Pending | Pending | Pending | Pending | Queued | `F0-foundation/` | Dispatch `F0` |
+| `F0` | F0 — Foundation and shared contracts | `awr-f0-foundation-01` | [F0 thread](t3-thread://v2/59505559-2c07-4bec-b08d-645e76a9750b/thread:delegated-task:command%3Amcp%3Ae0bcbc84-724b-453a-8c40-226f5bf42b80%3Adelegate-task%3Aawr-f0-foundation-01) | `349d582` | Pending | Running (async) | `F0-foundation/` | Await completion wake |
 | `C1` | C1 — Watch capture worker | — | — | — | — | Blocked on `F0` | `C1-watch-capture/` | Wait for `F0` |
 | `A1` | A1 — Local Arabic AI worker | — | — | — | — | Blocked on `F0` | `A1-arabic-ai/` | Wait for `F0` |
 | `S1` | S1 — Phone transfer and archive worker | — | — | — | — | Blocked on `F0` | `S1-transfer-storage/` | Wait for `F0` |
