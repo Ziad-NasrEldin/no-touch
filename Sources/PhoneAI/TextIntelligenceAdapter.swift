@@ -195,6 +195,22 @@ public actor TextIntelligenceAdapter: TextIntelligenceAdapterProtocol, EngineBac
         return metadata
     }
 
+    // MARK: - Memory surface (phase-boundary seams only)
+
+    /// Releases the engine's model resources so the other lane can use the
+    /// memory (R1-4). Runs under the shared `ModelExecutionGate`, so the
+    /// unload can never overlap in-flight inference on either engine; a
+    /// cancelled caller simply skips the release. The engine lazily
+    /// reloads on its next `load` — adapters already load inside the gate
+    /// on every job. Call only at pipeline phase boundaries or on memory
+    /// pressure — never from inside gate work (the gate is not reentrant).
+    public func unloadEngine() async {
+        let engine = self.engine
+        try? await gate.withExclusiveAccess {
+            await engine.unload()
+        }
+    }
+
     // MARK: - Install-flow surface
 
     public func installModel() async throws {

@@ -15,9 +15,13 @@ import BackgroundTasks
 ///   inference is on-device; the OS may still defer heavy work on battery.
 /// - Each drain pass is bounded (`maxJobsPerKind`); the loop exits when a
 ///   pass runs nothing. Work left over reschedules a later OS window.
-/// - Expiration cancels the drain Task; the in-flight job lands
+/// - Expiration cancels only the drain Task; the in-flight job lands
 ///   `.cancelled` and is revived by `reconcilePendingTranscriptions` on the
-///   next pass, so work is never orphaned.
+///   next activation, so work is never orphaned. The runner's process-
+///   lifetime `cancelled` flag is deliberately NOT touched here — routine
+///   OS expiration must not disable every later drain (foreground kick,
+///   `activate()`, or another BG window). `SessionCoordinator.cancelProcessing`
+///   remains for deliberate lifecycle shutdown only.
 public final class BackgroundAnalysisScheduler: @unchecked Sendable {
     public static let taskIdentifier = "com.placeholder.PhoneRecorder.processing"
 
@@ -86,9 +90,13 @@ public final class BackgroundAnalysisScheduler: @unchecked Sendable {
                 self.schedule(earliestBeginDate: Date().addingTimeInterval(15 * 60))
             }
         }
-        task.expirationHandler = { [weak self] in
+        task.expirationHandler = {
+            // Task cancellation alone covers expiration: it propagates into
+            // the runner's `Task.checkCancellation` checkpoints and lands
+            // the in-flight job `.cancelled`. `coordinator.cancelProcessing()`
+            // is intentionally absent — its process-lifetime flag would
+            // disable all future drains until relaunch (R1-1).
             drain.cancel()
-            Task { await self?.coordinator.cancelProcessing() }
         }
     }
 }

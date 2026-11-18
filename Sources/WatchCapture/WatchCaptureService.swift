@@ -425,8 +425,14 @@ public actor WatchCaptureService: WatchCaptureServiceProtocol {
             self.engine = nil
             activeChunkURL = nil
             wasRecordingBeforeInterruption = true
-            beginInterruption(at: wallStart, reason: .unknown,
+            let reason: FailureReason = freeSpaceIsLow() ? .lowStorage : failureReason(for: error)
+            beginInterruption(at: wallStart, reason: reason,
                               detail: "rotate-start-failed: \(error)")
+            // Same bounded one-shot recovery as encodeError/capture-loss —
+            // a transient start failure must not stall the session until
+            // manual resume. Low storage is the exception: retry can't help.
+            guard reason != .lowStorage else { return }
+            scheduleAutoRecovery(via: "rotate-retry")
             return
         }
         self.engine = next
@@ -476,8 +482,29 @@ public actor WatchCaptureService: WatchCaptureServiceProtocol {
             return
         }
         do {
+            // Bind the on-disk name to the sequence this seal assigns: a name
+            // evaluated at file-creation lags one behind for every rotated
+            // chunk, so the file is renamed here — `fileName` in metadata must
+            // always equal the real file on disk.
+            var sealedURL = url
+            let sealedName = Self.fileName(sequence: nextSequence)
+            if sealedName != url.lastPathComponent {
+                do {
+                    try FileManager.default.moveItem(
+                        at: url,
+                        to: url.deletingLastPathComponent()
+                            .appendingPathComponent(sealedName))
+                    sealedURL = url.deletingLastPathComponent()
+                        .appendingPathComponent(sealedName)
+                } catch {
+                    diagnostics.emit(.capture, name: "chunk-rename-failed",
+                                     severity: .warning,
+                                     payload: ["file": url.lastPathComponent,
+                                               "error": "\(error)"])
+                }
+            }
             let integrity = ChunkIntegrity(
-                sha256Hex: try Self.sha256Hex(of: url),
+                sha256Hex: try Self.sha256Hex(of: sealedURL),
                 byteCount: size,
                 duration: duration,
                 sequenceNumber: nextSequence,
@@ -493,7 +520,7 @@ public actor WatchCaptureService: WatchCaptureServiceProtocol {
             )
             let metadata = AudioChunkMetadata(
                 sessionID: sessionID,
-                fileName: url.lastPathComponent,
+                fileName: sealedURL.lastPathComponent,
                 format: Self.chunkFormat,
                 integrity: integrity
             )
@@ -512,6 +539,11 @@ public actor WatchCaptureService: WatchCaptureServiceProtocol {
                 "sha256": String(integrity.sha256Hex.prefix(16))
             ])
             if let outbox {
+                // The manifest row above is the durable record; this hop is
+                // only the fast path. A throw here — or process death before
+                // it runs — is recovered by the manifest↔outbox reconcile in
+                // `WatchTransferService.activate()`/pump, so the chunk can
+                // never strand silently.
                 Task { [diagnostics] in
                     do {
                         try await outbox.enqueueForTransfer(metadata)

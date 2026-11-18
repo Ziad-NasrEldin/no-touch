@@ -132,7 +132,11 @@ public enum MetadataPromptLibrary {
 /// Strict-grounding parser: maps model JSON back to
 /// `GeneratedConversationMetadata`, accepting only refs that exist in the
 /// rendered transcript and only owner/date fields the transcript literally
-/// supports. Items that can't be grounded are dropped — never guessed.
+/// supports. Items that can't be grounded are dropped — never guessed. The
+/// same rule applies per-field to title/summary: a field whose supplied
+/// refs all fail to resolve is dropped (claimed-but-failed grounding),
+/// while a field the model gave no refs key for is kept (unspecified ≠
+/// failed grounding — the model may summarize holistically).
 public enum MetadataResponseParser {
     public struct Failure: Error, Equatable {
         public let reason: String
@@ -241,17 +245,27 @@ public enum MetadataResponseParser {
             categories.contains(value) ? value : nil
         }
 
+        // Per-field grounding (R1-5): a refs key present but resolving to
+        // zero passages means the model claimed grounding it failed to
+        // deliver — drop the field, matching how decisions/action items
+        // with unresolvable refs are dropped above. A missing/null refs
+        // key means the model made no grounding claim — keep the field.
+        let titleSources = groundedRefs(output.title_refs)
+        let title = (output.title_refs != nil && titleSources.isEmpty) ? nil : cleaned(output.title)
+        let summarySources = groundedRefs(output.summary_refs)
+        let summary = (output.summary_refs != nil && summarySources.isEmpty) ? nil : cleaned(output.summary)
+
         let sources = dedupe(
-            groundedRefs(output.title_refs)
-                + groundedRefs(output.summary_refs)
+            titleSources
+                + summarySources
                 + decisions.flatMap(\.sources)
                 + actionItems.flatMap(\.sources)
         )
 
         return GeneratedConversationMetadata(
             conversationID: conversationID,
-            title: cleaned(output.title),
-            summary: cleaned(output.summary),
+            title: title,
+            summary: summary,
             suggestedCategory: category,
             decisions: decisions,
             actionItems: actionItems,

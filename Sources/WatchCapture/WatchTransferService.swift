@@ -46,8 +46,10 @@ struct OutboxStore: Sendable {
 /// lost ack otherwise strands the chunk forever; resending is safe because
 /// the receive contract requires the phone to deduplicate.
 public actor WatchTransferService: WatchTransferServiceProtocol {
-    /// Attempts past this stay `.failed` until the next manual pump — the
-    /// queue never silently drops an unacknowledged chunk.
+    /// Send attempts plus phone rejections past this bound park the entry
+    /// `.failed` until the next activation — the queue never silently drops
+    /// an unacknowledged chunk, and a permanently-rejected chunk never
+    /// resends forever.
     static let maxAttempts = 12
 
     private let paths: CapturePaths
@@ -129,7 +131,10 @@ public actor WatchTransferService: WatchTransferServiceProtocol {
 
     /// Activates the transport then drains the queue. Safe to call again on
     /// every foregrounding; activation failure is logged, not thrown. Each
-    /// activation is a fresh retry window for entries parked as `.failed`.
+    /// activation is a fresh retry window for entries parked as `.failed`,
+    /// and reconciles the capture manifest against the outbox so a chunk
+    /// persisted but never enqueued (crash in the seal→enqueue window) is
+    /// re-queued here.
     public func activate() async {
         do {
             try await transport.activate()
@@ -145,6 +150,7 @@ public actor WatchTransferService: WatchTransferServiceProtocol {
             reset = true
         }
         if reset { persist() }
+        reconcileManifestsWithOutbox()
         await pump()
     }
 
@@ -197,9 +203,35 @@ public actor WatchTransferService: WatchTransferServiceProtocol {
     /// against the ack before anything is removed.
     public func apply(acknowledgment: TransferAcknowledgment) async throws {
         guard acknowledgment.status == .acknowledged else {
-            diagnostics.emit(.transfer, name: "ack-non-acknowledged", severity: .warning,
-                             payload: ["chunkID": acknowledgment.chunkID.uuidString,
-                                       "status": acknowledgment.status.rawValue])
+            guard acknowledgment.status == .failed else {
+                diagnostics.emit(.transfer, name: "ack-non-acknowledged", severity: .warning,
+                                 payload: ["chunkID": acknowledgment.chunkID.uuidString,
+                                           "status": acknowledgment.status.rawValue])
+                return
+            }
+            guard let index = entries.firstIndex(where: { $0.chunk.id == acknowledgment.chunkID }) else {
+                diagnostics.emit(.transfer, name: "ack-unknown-chunk", severity: .warning,
+                                 payload: ["chunkID": acknowledgment.chunkID.uuidString])
+                return
+            }
+            // The phone rejected this delivery outright. Count it against the
+            // same budget sends use: a transient rejection still self-heals
+            // (ack-timeout requeues, a later .acknowledged retires the row),
+            // but a permanently-rejected chunk parks .failed once the budget
+            // is spent instead of resending ~144×/day forever.
+            entries[index].attemptCount += 1
+            entries[index].lastError = "ack-rejected"
+            if entries[index].attemptCount >= Self.maxAttempts {
+                entries[index].status = .failed
+                diagnostics.emit(.transfer, name: "chunk-parked-rejected", severity: .error,
+                                 payload: ["chunkID": acknowledgment.chunkID.uuidString,
+                                           "attempts": "\(entries[index].attemptCount)"])
+            } else {
+                diagnostics.emit(.transfer, name: "ack-rejected", severity: .warning,
+                                 payload: ["chunkID": acknowledgment.chunkID.uuidString,
+                                           "attempts": "\(entries[index].attemptCount)"])
+            }
+            persist()
             return
         }
         guard let index = entries.firstIndex(where: { $0.chunk.id == acknowledgment.chunkID }) else {
@@ -275,10 +307,19 @@ public actor WatchTransferService: WatchTransferServiceProtocol {
     /// requires the phone to deduplicate on chunk id.
     static let ackTimeout: TimeInterval = 10 * 60
 
+    /// Manifest↔outbox reconcile cadence while the process stays alive.
+    /// `activate()` is the primary hook; this bounds how long a missed
+    /// enqueue can strand during uninterrupted background capture.
+    static let reconcileInterval: TimeInterval = 10 * 60
+    private var lastManifestReconcileAt: Date = .distantPast
+
     private func drainOnce() async {
         var changed = false
         // Requeue stale awaiting-ack entries before picking what to send.
         let now = Date()
+        if now.timeIntervalSince(lastManifestReconcileAt) > Self.reconcileInterval {
+            reconcileManifestsWithOutbox()
+        }
         for index in entries.indices {
             guard entries[index].status == .awaitingAcknowledgment,
                   let last = entries[index].lastAttemptAt,
@@ -325,6 +366,58 @@ public actor WatchTransferService: WatchTransferServiceProtocol {
             changed = true
         }
         if changed { persist() }
+    }
+
+    /// Manifest↔outbox reconcile: a chunk persisted into the capture
+    /// manifest but never enqueued — crash or persist failure inside the
+    /// seal→enqueue window — has no outbox row and would strand forever.
+    /// Any manifested chunk with no row whose file still exists is re-queued
+    /// here; orphan cleanup keeps manifested files, so the file's presence
+    /// is proof it was never retired. Idempotent: existing rows are skipped
+    /// by chunk id, and an already-retired chunk (verified-ack deletion
+    /// removes both row and file; explicit discard does the same) has no
+    /// file and is left alone rather than surfaced as a false failure.
+    private func reconcileManifestsWithOutbox() {
+        lastManifestReconcileAt = Date()
+        let sessionStore = CaptureSessionStore(paths: paths)
+        let manifestsDir = paths.root
+            .appendingPathComponent("manifests", isDirectory: true)
+        let names = (try? FileManager.default
+            .contentsOfDirectory(atPath: manifestsDir.path)) ?? []
+        var tracked = Set(entries.map { $0.chunk.id })
+        var recovered = 0
+        for name in names where name.hasSuffix(".json") {
+            guard let sessionID = UUID(uuidString: String(name.dropLast(".json".count)))
+            else { continue }
+            for chunk in sessionStore.loadManifest(sessionID: sessionID) {
+                guard !tracked.contains(chunk.id) else { continue }
+                guard FileManager.default
+                    .fileExists(atPath: paths.url(for: chunk).path)
+                else { continue }
+                entries.append(OutboxEntry(
+                    chunk: chunk,
+                    status: .queued,
+                    enqueuedAt: Date(),
+                    attemptCount: 0,
+                    lastAttemptAt: nil,
+                    lastError: "manifest-reconcile"
+                ))
+                tracked.insert(chunk.id)
+                recovered += 1
+                diagnostics.emit(.transfer, name: "reconcile-recovered-chunk",
+                                 severity: .warning,
+                                 payload: ["chunkID": chunk.id.uuidString,
+                                           "sessionID": chunk.sessionID.uuidString,
+                                           "seq": "\(chunk.integrity.sequenceNumber)",
+                                           "file": chunk.fileName])
+            }
+        }
+        if recovered > 0 {
+            persist()
+            diagnostics.emit(.transfer, name: "manifest-reconcile",
+                             payload: ["recovered": "\(recovered)",
+                                       "entries": "\(entries.count)"])
+        }
     }
 
     private var pumping = false

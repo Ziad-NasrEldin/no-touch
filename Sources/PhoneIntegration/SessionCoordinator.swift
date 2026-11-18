@@ -5,6 +5,9 @@ import PhoneStorage
 #if canImport(Darwin)
 import Darwin
 #endif
+#if os(iOS) && canImport(UIKit)
+import UIKit
+#endif
 
 /// Phase 2 integration seam (I1): owns the phone-side pipeline end-to-end —
 /// receive → durable archive → transcription jobs → cross-chunk regrouping →
@@ -40,6 +43,21 @@ public actor SessionCoordinator {
     #if os(iOS) && canImport(WatchConnectivity)
     private let transport: WatchConnectivityReceiveTransport
     #endif
+    #if os(iOS) && canImport(UIKit)
+    /// Owns the memory-warning observer registration (the token unregisters
+    /// on its own deinit, so the actor needs no deinit isolation juggling).
+    /// Lazy so the observer closure's `self` capture always happens after
+    /// init completes; forced on first `activate()`.
+    private lazy var memoryWarningToken: ObserverToken? = ObserverToken(
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            Task { [weak self] in await self?.releaseModelMemory() }
+        }
+    )
+    #endif
 
     // MARK: - Construction
 
@@ -57,11 +75,16 @@ public actor SessionCoordinator {
         let store = SQLiteArchiveStore()
 
         // Ingest→enqueue seam: fires once per fresh durable chunk, inside
-        // the receive path after registry insert and before the ack.
+        // the receive path after registry insert and before the ack. A
+        // fresh enqueue also fires the drain relay (bound to the
+        // coordinator below) so foreground-arriving work drains promptly
+        // instead of waiting for the next lifecycle event (R1-7).
+        let drainKick = DrainKickRelay()
         let receiveService = PhoneReceiveService(archiveStore: store) { metadata in
             do {
                 if try await store.hasAnalysisJob(kind: .transcription, chunkID: metadata.id) == false {
                     try await store.enqueueAnalysisJob(AnalysisJob(kind: .transcription, chunkID: metadata.id))
+                    drainKick.fire()
                 }
             } catch {
                 await store.record(DiagnosticsEvent(
@@ -82,12 +105,18 @@ public actor SessionCoordinator {
         let intelligence = try PhoneAI.makeTextAdapter(
             descriptor: textDescriptor, modelsRoot: root, gate: gate, diagnostics: diagnostics
         )
-        return SessionCoordinator(
+        let coordinator = SessionCoordinator(
             receiveService: receiveService,
             store: store,
             transcriber: transcriber,
             intelligence: intelligence
         )
+        // Late-bind the kick — the receive hook is constructed before the
+        // coordinator exists. A fired kick schedules one bounded drain
+        // (coalesced with any pass already running). A kick dropped before
+        // binding is harmless: `activate()` drains regardless.
+        drainKick.handler = { [weak coordinator] in coordinator?.kickProcessing() }
+        return coordinator
     }
 
     /// Injectable init for alternate stores/transports. The receive service
@@ -128,6 +157,9 @@ public actor SessionCoordinator {
     /// deletion propagation, reconciles missed enqueues, then drains the
     /// queue. Idempotent — safe to call on every foreground.
     public func activate() async {
+        #if os(iOS) && canImport(UIKit)
+        _ = memoryWarningToken // bind the memory-warning observer once (lazy)
+        #endif
         do {
             try await receiveService.prepare()
         } catch {
@@ -143,10 +175,26 @@ public actor SessionCoordinator {
     }
 
     /// Stops the drain loop cooperatively (in-flight job completes; queued
-    /// jobs persist for the next pass). Call on a deliberate shutdown only —
-    /// the runner's cancelled flag is process-lifetime.
+    /// jobs persist for the next pass). Reserved for deliberate,
+    /// process-lifetime shutdown (app teardown / account-reset class
+    /// events) — the runner's `cancelled` flag is never reset, so this must
+    /// NOT be used for routine events like a `BGProcessingTask` expiration
+    /// (Task cancellation covers those; see `BackgroundAnalysisScheduler`).
     public func cancelProcessing() async {
         await runner.cancel()
+    }
+
+    /// Memory-pressure relief (R1-4): unloads BOTH engines through the
+    /// shared execution gate — each unload waits out any in-flight
+    /// inference, so it can never race a running job — and the engines
+    /// lazily reload on their next `load`. Bound to
+    /// `UIApplication.didReceiveMemoryWarningNotification` on iOS; other
+    /// embedders can call it directly from their own pressure seam.
+    /// Job outcomes are unaffected — only residency drops.
+    public func releaseModelMemory() async {
+        await transcriber.unloadEngine()
+        await intelligence.unloadEngine()
+        await emit(.warning, "integration.models_unloaded", ["reason": "memory_pressure"])
     }
 
     // MARK: - Ingest (data-path seam)
@@ -194,6 +242,13 @@ public actor SessionCoordinator {
             }
         }
 
+        // Phase boundary (R1-4): the speech engine's work this pass is
+        // done — release its residency before any text-model work (regroup
+        // boundary reviews + the intelligence drain) so both models are
+        // never co-resident. The unload is gate-serialized (waits out any
+        // in-flight inference); the engine lazily reloads on next use.
+        await transcriber.unloadEngine()
+
         // Phase 2 — regroup dirty sessions + any session holding ungrouped
         // segments (crash-convergence: a regroup missed by an earlier pass is
         // always found again).
@@ -225,6 +280,11 @@ public actor SessionCoordinator {
             guard job != nil else { break }
             summary.intelligenceJobs += 1
         }
+
+        // Pass end (R1-4): release the text engine's residency too — a
+        // following pass's transcription phase then starts with no model
+        // resident, keeping peak residency at one engine across passes.
+        await intelligence.unloadEngine()
 
         await emit(.info, "integration.drain_completed", [
             "transcription_jobs": "\(summary.transcriptionJobs)",
@@ -331,10 +391,19 @@ public actor SessionCoordinator {
         }
         drainScheduled = true
         Task {
-            repeat {
+            // Bounded passes self-continue while durable work remains
+            // (R1-7): a mid-pass enqueue (kick → drainAgain) or a pass that
+            // hit its per-kind cap must not strand queued jobs until the
+            // next lifecycle event. A zero-progress pass stops regardless —
+            // error paths leave jobs queued, and looping there would spin.
+            var again = true
+            while again {
                 drainAgain = false
-                _ = await self.processAnalysisQueue()
-            } while self.drainAgain
+                let summary = await self.processAnalysisQueue()
+                let ran = summary.transcriptionJobs + summary.intelligenceJobs
+                let remaining = await self.queuedJobCount()
+                again = self.drainAgain || (ran > 0 && remaining > 0)
+            }
             drainScheduled = false
         }
     }
@@ -436,4 +505,21 @@ public actor SessionCoordinator {
     private func errorClass(_ error: Error) -> String {
         String(describing: type(of: error))
     }
+}
+
+/// Late-bound drain trigger — the `onChunkStored` receive hook is built
+/// before the coordinator exists, so `makeDefault` binds the target after
+/// init. Firing is synchronous and cheap (spawns one coalesced drain Task).
+private final class DrainKickRelay: @unchecked Sendable {
+    var handler: (@Sendable () -> Void)?
+    func fire() { handler?() }
+}
+
+/// Owns a `NotificationCenter` observer registration and unregisters it on
+/// deinit — lets the actor hold a registration without deinit isolation
+/// concerns (`NotificationCenter` observers must be removed eventually).
+private final class ObserverToken: @unchecked Sendable {
+    private let observer: NSObjectProtocol
+    init(_ observer: NSObjectProtocol) { self.observer = observer }
+    deinit { NotificationCenter.default.removeObserver(observer) }
 }
