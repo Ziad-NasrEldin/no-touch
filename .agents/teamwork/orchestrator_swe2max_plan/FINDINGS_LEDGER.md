@@ -14,4 +14,6 @@
 
 | ID | Severity | Observable Failure / Gap | Owner | Repair Checkpoint | Evidence | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | — | No implementation findings recorded yet. | — | — | — | — |
+| `F-01` | low | Span-level audio redaction unimplemented: a chunk shared by several conversations keeps the deleted conversation's audio until every referencing conversation is deleted (spec permits either option; product decision needed) | `I1` / User | — | `S1-transfer-storage/handoff.md` §3 | open |
+| `F-02` | info | `ConversationArchiveStoreProtocol` narrower than delivered store — S1 requested 5 contract promotions (search, effectiveMetadata/override checks, audioFileURL, session upserts, retention/diagnostics propagation) for `I1` sign-off | `I1` | — | `S1-transfer-storage/handoff.md` App. D | open |
+| `F-03` | info | `PhoneRecorderApp` shell still calls `Placeholder*` typealiases over real stores — must be rewired explicitly | `I1` | — | `S1-transfer-storage/handoff.md` §3 | open |
