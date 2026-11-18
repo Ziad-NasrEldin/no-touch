@@ -1,6 +1,6 @@
 # I1 — Integration worker — progress
 
-## Status: in progress — implementation landed, package build green, xcodebuilds running
+## Status: COMPLETE — integrated tree committed as `6bda965`, handoff written
 
 ## Done so far
 - Read BRIEFING.md + all four lane handoffs (F0, C1, A1, S1) fully + spec.md + master plan + findings ledger.
@@ -20,10 +20,15 @@
 9. **Info.plist (phone)**: `BGTaskSchedulerPermittedIdentifiers` = `com.placeholder.PhoneRecorder.processing` (BG draining implemented).
 10. **CapturePaths**: `.completeUntilFirstUserAuthentication` on watch capture root (privacy parity with phone archive).
 
-## Builds
+## Builds (all green)
 - `swift build --scratch-path .build/i1` → **Build complete** (all targets + real deps, macOS).
-- `xcodebuild PhoneRecorderApp (iOS Simulator generic)` → running.
-- `xcodebuild WatchRecorderApp (watchOS Simulator generic)` → pending.
+- `xcodebuild PhoneRecorderApp (iOS Sim generic, -skipPackagePluginValidation -skipMacroValidation)` → **BUILD SUCCEEDED**.
+- `xcodebuild WatchRecorderApp (watchOS Sim generic, same flags)` → **BUILD SUCCEEDED**.
+- Plugin-validation flags required: mlx-swift's `CudaBuild` plugin fails non-interactive trust validation. Two integration compile errors fixed en route (BGTask Sendable capture; await placement).
+
+## Result
+- Integrated tree committed on `main` as **`6bda965`** (49 files, +8639/−294).
+- `handoff.md` written — five parts, all decision tables, Gate A readiness, unexercised scenarios.
 
 ## Decisions (recording for handoff)
 - S1 App.D-1 promote store APIs → **ACCEPT** (`ExtendedArchiveStoreProtocol`).
