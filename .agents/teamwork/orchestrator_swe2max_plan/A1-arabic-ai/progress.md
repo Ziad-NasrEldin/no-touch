@@ -1,6 +1,6 @@
 # A1 — Local Arabic AI worker — progress
 
-## Status: implementation written, package+scheme build clean; eval packaging in progress
+## Status: complete — implementation + real-model evals done, handoff written
 
 ## Done so far
 - Read briefing, spec sections (transcription candidate, text intelligence, execution/resource use, derived outputs), F0 handoff (dependency decisions for A1), frozen contracts.
@@ -24,8 +24,13 @@
   - `swift build --scratch-path .build/a1 --target PhoneAI` → Build complete, zero warnings.
   - `xcodebuild -scheme PhoneRecorderApp -destination "generic/platform=iOS Simulator" -derivedDataPath .build/DerivedData-a1 build` → BUILD SUCCEEDED.
 
-## In progress
-- `.build/a1-eval/` scratch SPM package: compile real `Sources/PhoneAI` against WhisperKit+MLX, generate self-made TTS samples (`say -v Majed` Arabic + English voice), run install+transcribe+metadata smoke runs w/ timing+memory.
+## Eval results (macOS arm64, Xcode 27.2, real deps compiled)
+- `.build/a1-eval/` compiled the SHIPPED `WhisperKitIntegration.swift`/`MLXIntegration.swift` against real `WhisperKit 1.1.1` + `MLXLLM/MLXLMCommon 2.31.3` — caught and fixed two real bugs (`DirectoryEnumerator` iteration unavailable in async contexts → `nextObject()`; WhisperKit `segment.text` leaks decoder control tokens → `stripSpecialTokens`).
+- Install flow (.files method, real HTTPS): notInstalled → downloading(progress) → verifying → ready; snapshot persisted and restored on fresh controller.
+- WhisperKit `large-v3-v20240930_626MB`: downloaded 625MB in 82.1s via `WhisperKit.download`; cold transcribe (first CoreML compile) 80–113s; warm 2.86s for 9.74s clip (RTF 0.30); peak RSS 126MB. AR output "مرحبا اجتماعنا بكرة الساعة ثلاثة العصر" + "قررنا نراجع المشروع ونجهز العرض التقديمي" (conf 0.92, lang `ar`); EN "We will review the deployment plan tomorrow and assign the action items." (conf 0.90); LanguageSpans cover full text ranges after token-strip fix.
+- MLX `Qwen3-1.7B-4bit`: downloaded ~937MB in 115.7s via `downloadModel`; load 1.8s; metadata 6.16s for 5-segment prompt, peak RSS 1,086MB. Valid JSON; 3 decisions + 1 action item all grounded to S-refs; title/summary null (model emitted null); category emitted `مالية` (not in list) → correctly dropped by strict parser; `<think></think>` block tolerated by parser.
+- Grouping heuristic: 2 groups from gap threshold, second marked provisional. AnalysisJobRunner: 1 job drained end-to-end through in-memory archive + gate.
+- Deterministic engines: VAD segment + extractive metadata produced.
 
 ## Notes / decisions
 - Engine seam made public deliberately: the eval harness binds the same `PhoneAI` sources with deps registered, exercising the shipped `WhisperKitSpeechEngine`/`MLXChatTextEngine` code paths for real (not just the API contract).
