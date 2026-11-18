@@ -1,0 +1,16 @@
+{
+  "requestedModel": "SWE 2 Max",
+  "selectionStatus": "verified",
+  "selectedProviderInstanceId": "acpRegistry_devin",
+  "selectedModelId": "swe-2-high",
+  "selectedModelLabel": "SWE-2",
+  "selectedOptions": {
+    "thought_level": "max",
+    "mode": "accept-edits",
+    "speed": "standard"
+  },
+  "observedProviderInstanceId": "acpRegistry_devin",
+  "substitutionAuthorized": false,
+  "workersLaunched": 0,
+  "maximumConcurrentWorkers": 3
+}
