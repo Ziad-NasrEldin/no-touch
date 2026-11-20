@@ -4,21 +4,24 @@ import RecorderContracts
 import PhoneIntegration
 import PhoneStorage
 
-/// Tracks the watch's current recording session on the iPhone and mirrors it
+/// Tracks the current recording session (Apple Watch or iPhone) and mirrors it
 /// into an in-app banner plus a Live Activity (Lock Screen + Dynamic Island).
 ///
-/// Inputs: session snapshots and chunk arrivals posted by the WatchConnectivity
-/// transport, plus a reload from the archive whenever the app becomes active.
-/// iOS only lets an app *start* a Live Activity while it is in the foreground,
-/// so a start that fails in the background is retried on the next foreground.
+/// Inputs: session snapshots and chunk arrivals posted by WatchConnectivity
+/// or `PhoneCaptureService`, plus a reload from the archive whenever the app
+/// becomes active. iOS only lets an app *start* a Live Activity while it is
+/// in the foreground, so a start that fails in the background is retried on
+/// the next foreground.
 @MainActor
 final class LiveRecordingStatus: ObservableObject {
     @Published private(set) var session: RecordingSession?
+    @Published private(set) var source: RecordingActivityAttributes.ContentState.Source = .watch
     @Published private(set) var clipCount = 0
     @Published private(set) var lastHeardAt: Date?
 
     private weak var coordinator: SessionCoordinator?
-    private var observers: [NSObjectProtocol] = []
+    private weak var phoneCapture: PhoneCaptureService?
+    private nonisolated(unsafe) var observers: [NSObjectProtocol] = []
     /// ID of the Live Activity we own (activities are looked up by ID so
     /// the non-Sendable `Activity` never crosses isolation boundaries).
     private var activityID: String?
@@ -29,8 +32,9 @@ final class LiveRecordingStatus: ObservableObject {
         return state == .recording || state == .paused || state == .interrupted
     }
 
-    init(coordinator: SessionCoordinator?) {
+    init(coordinator: SessionCoordinator?, phoneCapture: PhoneCaptureService? = nil) {
         self.coordinator = coordinator
+        self.phoneCapture = phoneCapture
         if let existing = Activity<RecordingActivityAttributes>.activities.first {
             activityID = existing.id
             activitySessionID = existing.attributes.sessionID
@@ -40,7 +44,9 @@ final class LiveRecordingStatus: ObservableObject {
             forName: RecorderLiveNotifications.sessionDidChange, object: nil, queue: .main
         ) { [weak self] note in
             guard let snapshot = note.userInfo?["session"] as? RecordingSession else { return }
-            Task { @MainActor in await self?.apply(snapshot) }
+            let incomingSource: RecordingActivityAttributes.ContentState.Source =
+                (note.userInfo?["source"] as? String) == "phone" ? .phone : .watch
+            Task { @MainActor in await self?.apply(snapshot, source: incomingSource) }
         })
         observers.append(center.addObserver(
             forName: RecorderLiveNotifications.chunkDidArrive, object: nil, queue: .main
@@ -51,22 +57,53 @@ final class LiveRecordingStatus: ObservableObject {
         Task { await reloadFromArchive() }
     }
 
-    /// Picks up the newest session from the archive (e.g. after launch or
-    /// returning to the foreground) and (re)starts the Live Activity.
-    func reloadFromArchive() async {
-        if let coordinator {
-            let store = coordinator.archiveStore()
-            let sessions = (try? await store.sessions()) ?? []
-            guard let latest = sessions.max(by: {
-                ($0.startedAt ?? .distantPast) < ($1.startedAt ?? .distantPast)
-            }) else { return }
-            await apply(latest)
+    deinit {
+        for observer in observers {
+            NotificationCenter.default.removeObserver(observer)
         }
     }
 
-    private func apply(_ snapshot: RecordingSession) async {
+    /// Picks up the active or newest session from the archive (e.g. after
+    /// launch or returning to the foreground) and (re)starts the Live Activity.
+    func reloadFromArchive() async {
+        guard let coordinator else { return }
+        let store = coordinator.archiveStore()
+        let sessions = (try? await store.sessions()) ?? []
+        let phoneSession = await phoneCapture?.currentSession()
+        let phoneSessionID = phoneSession?.id
+
+        var candidates = sessions
+        if let phoneSession, !candidates.contains(where: { $0.id == phoneSession.id }) {
+            candidates.append(phoneSession)
+        }
+        guard !candidates.isEmpty else { return }
+
+        let liveCandidates = candidates.filter { Self.isSessionLive($0.state) }
+        let pool = liveCandidates.isEmpty ? candidates : liveCandidates
+        guard let chosen = pool.max(by: {
+            ($0.startedAt ?? .distantPast) < ($1.startedAt ?? .distantPast)
+        }) else { return }
+
+        let resolvedSource: RecordingActivityAttributes.ContentState.Source =
+            (chosen.id == phoneSessionID) ? .phone : .watch
+        await apply(chosen, source: resolvedSource)
+    }
+
+    private func apply(
+        _ snapshot: RecordingSession,
+        source incomingSource: RecordingActivityAttributes.ContentState.Source
+    ) async {
+        // Do not let a stopped/idle snapshot from one device clobber a
+        // different currently-live session on the other device.
+        if !Self.isSessionLive(snapshot.state),
+           isLive,
+           let currentID = session?.id,
+           currentID != snapshot.id {
+            return
+        }
         if session?.id != snapshot.id { clipCount = 0 }
         session = snapshot
+        source = incomingSource
         lastHeardAt = Date()
         if let coordinator {
             clipCount = await coordinator.receivedChunks(sessionID: snapshot.id).count
@@ -78,11 +115,17 @@ final class LiveRecordingStatus: ObservableObject {
         lastHeardAt = Date()
         if let coordinator, let id = sessionID ?? session?.id {
             if session?.id != id, let fresh = try? await coordinator.archiveStore().session(id: id) {
+                let phoneID = await phoneCapture?.currentSession()?.id
                 session = fresh
+                source = (id == phoneID) ? .phone : .watch
             }
             clipCount = await coordinator.receivedChunks(sessionID: id).count
         }
         await syncActivity()
+    }
+
+    private static func isSessionLive(_ state: SessionState) -> Bool {
+        state == .recording || state == .paused || state == .interrupted
     }
 
     // MARK: Live Activity
@@ -100,14 +143,22 @@ final class LiveRecordingStatus: ObservableObject {
             phase: phase,
             startedAt: session.startedAt ?? Date(),
             clipCount: clipCount,
-            lastHeardAt: lastHeardAt ?? Date()
+            lastHeardAt: lastHeardAt ?? Date(),
+            source: source
         )
     }
 
     private func syncActivity() async {
-        // Stay awake in the background while the watch is recording so
-        // clips transcribe live; release as soon as the day stops.
-        if isLive { BackgroundKeepAlive.shared.start() } else { BackgroundKeepAlive.shared.stop() }
+        // BackgroundKeepAlive uses a silent `.playback` audio engine to keep
+        // the iPhone awake while the Apple Watch records. When the iPhone is
+        // recording locally, its own `.record` session keeps the app alive —
+        // starting BackgroundKeepAlive would clobber `.record` and disrupt capture.
+        let phoneIsRecording = (await phoneCapture?.currentSession()?.state) == .recording
+        if isLive && source == .watch && !phoneIsRecording {
+            BackgroundKeepAlive.shared.start()
+        } else {
+            BackgroundKeepAlive.shared.stop()
+        }
         guard let session, let state = contentState else { return }
         let content = ActivityContent(state: state, staleDate: Date().addingTimeInterval(15 * 60))
         let sessionKey = session.id.uuidString
@@ -154,8 +205,8 @@ final class LiveRecordingStatus: ObservableObject {
     }
 }
 
-/// In-app banner shown at the top of the Recordings tab while the watch is
-/// recording (or paused/interrupted).
+/// In-app banner shown at the top of the Recordings tab while Apple Watch or
+/// iPhone is recording (or paused/interrupted).
 struct LiveRecordingBanner: View {
     @ObservedObject var status: LiveRecordingStatus
     @State private var pulse = false
@@ -179,7 +230,8 @@ struct LiveRecordingBanner: View {
                 .onAppear { pulse = true }
                 .onDisappear { pulse = false }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title(session.state) + " on Apple Watch").font(.subheadline.weight(.semibold))
+                    Text("\(title(session.state)) on \(status.source.deviceName)")
+                        .font(.subheadline.weight(.semibold))
                     HStack(spacing: 4) {
                         Text("\(status.clipCount) min saved")
                         if let heard = status.lastHeardAt {

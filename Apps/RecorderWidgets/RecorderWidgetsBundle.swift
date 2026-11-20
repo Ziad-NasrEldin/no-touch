@@ -36,7 +36,7 @@ struct RecordingLiveActivity: Widget {
                         .font(.title2.weight(.semibold).monospacedDigit())
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    Text("Apple Watch · last update \(state.lastHeardAt, style: .relative) ago")
+                    Text("\(state.source.deviceName) · last update \(state.lastHeardAt, style: .relative) ago")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
             } compactLeading: {
@@ -68,7 +68,7 @@ private struct LockScreenView: View {
                     .foregroundStyle(state.phase.tint)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(state.phase.title + " on Apple Watch")
+                Text("\(state.phase.title) on \(state.source.deviceName)")
                     .font(.headline).foregroundStyle(.white)
                 Text("\(state.clipCount) min saved · updated \(state.lastHeardAt, style: .relative) ago")
                     .font(.caption).foregroundStyle(.white.opacity(0.7))

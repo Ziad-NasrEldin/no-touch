@@ -27,6 +27,7 @@
 		A1A1A1A1A1A1A1A1A1A1A104 /* LiveRecordingStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1A112 /* LiveRecordingStatus.swift */; };
 		A1A1A1A1A1A1A1A1A1A1A105 /* RecorderWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1A113 /* RecorderWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A1A1A1A1A1A1A1A1A1A1A106 /* BackgroundKeepAlive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1A115 /* BackgroundKeepAlive.swift */; };
+		A1A1A1A1A1A1A1A1A1A1A107 /* RecordView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1A116 /* RecordView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -89,6 +90,7 @@
 		A1A1A1A1A1A1A1A1A1A1A113 /* RecorderWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = RecorderWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1A1A1A1A1A1A1A1A1A1A114 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A1A1A1A1A1A1A1A1A1A1A115 /* BackgroundKeepAlive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundKeepAlive.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A1A116 /* RecordView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -152,6 +154,7 @@
 				F0F0F0F0F0F0F0F0F0F0F0E4 /* RecordingsView.swift */,
 				A1A1A1A1A1A1A1A1A1A1A112 /* LiveRecordingStatus.swift */,
 				A1A1A1A1A1A1A1A1A1A1A115 /* BackgroundKeepAlive.swift */,
+				A1A1A1A1A1A1A1A1A1A1A116 /* RecordView.swift */,
 				F0F0F0F0F0F0F0F0F0F0F044 /* Info.plist */,
 			);
 			path = PhoneRecorderApp;
@@ -362,6 +365,7 @@
 				A1A1A1A1A1A1A1A1A1A1A101 /* RecordingActivityAttributes.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A1A104 /* LiveRecordingStatus.swift in Sources */,
 				A1A1A1A1A1A1A1A1A1A1A106 /* BackgroundKeepAlive.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A1A107 /* RecordView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

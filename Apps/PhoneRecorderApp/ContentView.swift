@@ -9,7 +9,7 @@ struct ContentView: View {
     var body: some View {
         List {
             Section {
-                Text("1. The watch records in short clips and sends them to this iPhone.\n2. The speech model turns each clip into text.\n3. The text model groups text into conversations and adds a title, summary and category.\n\nInstall both models once over Wi-Fi (about 1.7 GB), then tap Process now. Afterwards processing runs automatically.")
+                Text("1. Your Apple Watch or iPhone records in short clips and saves them to the local archive.\n2. The speech model turns each clip into text.\n3. The text model groups text into conversations and adds a title, summary and category.\n\nInstall both models once over Wi-Fi (about 1.7 GB), then tap Process now. Afterwards processing runs automatically.")
                     .font(.footnote)
             } header: {
                 Text("How it works")

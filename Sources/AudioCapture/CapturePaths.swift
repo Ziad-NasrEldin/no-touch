@@ -1,30 +1,34 @@
 import Foundation
 import RecorderContracts
 
-/// On-disk layout for everything `WatchCapture` persists. One app-owned root
-/// keeps session truth, chunk payloads, manifests, the transfer outbox, and
-/// diagnostics together so Gate A evidence and crash recovery read one tree.
-struct CapturePaths: Sendable {
-    let root: URL
+/// On-disk layout for everything a chunked capture service persists. One
+/// app-owned root keeps session truth, chunk payloads, manifests, any outbox,
+/// and diagnostics together so crash recovery reads one tree.
+public struct CapturePaths: Sendable {
+    public let root: URL
 
-    var sessionFile: URL { root.appendingPathComponent("session.json") }
-    var outboxFile: URL { root.appendingPathComponent("outbox.json") }
-    var diagnosticsFile: URL {
+    public init(root: URL) {
+        self.root = root
+    }
+
+    public var sessionFile: URL { root.appendingPathComponent("session.json") }
+    public var outboxFile: URL { root.appendingPathComponent("outbox.json") }
+    public var diagnosticsFile: URL {
         root.appendingPathComponent("diagnostics", isDirectory: true)
             .appendingPathComponent("events.jsonl")
     }
 
-    func chunksDirectory(sessionID: UUID) -> URL {
+    public func chunksDirectory(sessionID: UUID) -> URL {
         root.appendingPathComponent("chunks", isDirectory: true)
             .appendingPathComponent(sessionID.uuidString, isDirectory: true)
     }
 
-    func manifestFile(sessionID: UUID) -> URL {
+    public func manifestFile(sessionID: UUID) -> URL {
         root.appendingPathComponent("manifests", isDirectory: true)
             .appendingPathComponent("\(sessionID.uuidString).json")
     }
 
-    func url(for chunk: AudioChunkMetadata) -> URL {
+    public func url(for chunk: AudioChunkMetadata) -> URL {
         chunksDirectory(sessionID: chunk.sessionID)
             .appendingPathComponent(chunk.fileName)
     }
@@ -32,15 +36,20 @@ struct CapturePaths: Sendable {
     /// Ensures the root and fixed subdirectories exist and marks the audio
     /// root excluded from backup so a paired-device backup cannot carry raw
     /// recordings off-device (spec: exclude recordings from cloud backup).
-    static func makeDefault(fileManager: FileManager = .default) throws -> CapturePaths {
+    public static func makeDefault(
+        folderName: String = "WatchCapture",
+        fileManager: FileManager = .default
+    ) throws -> CapturePaths {
         guard let support = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             throw RecorderError.storageFailure
         }
-        return try makeCustom(root: support.appendingPathComponent("WatchCapture", isDirectory: true),
-                              fileManager: fileManager)
+        return try makeCustom(
+            root: support.appendingPathComponent(folderName, isDirectory: true),
+            fileManager: fileManager
+        )
     }
 
-    static func makeCustom(root: URL, fileManager: FileManager = .default) throws -> CapturePaths {
+    public static func makeCustom(root: URL, fileManager: FileManager = .default) throws -> CapturePaths {
         let paths = CapturePaths(root: root)
         for dir in [root,
                     root.appendingPathComponent("chunks", isDirectory: true),

@@ -245,6 +245,9 @@ final class ChunkPlayer: ObservableObject {
     private var timeControlKVO: NSKeyValueObservation?
     private var notificationObservers: [NSObjectProtocol] = []
     private var isScrubbing = false
+    /// Returns true when local iPhone capture owns the audio session, so
+    /// playback refuses to clobber `.record` instead of interrupting capture.
+    var isPhoneRecordingProvider: (() -> Bool)?
 
     func togglePlayPause(for item: RecordingItem, coordinator: SessionCoordinator?) async {
         await togglePlayPause(
@@ -347,6 +350,11 @@ final class ChunkPlayer: ObservableObject {
 
         guard generation == loadGeneration else { return }
 
+        if isPhoneRecordingProvider?() == true {
+            fail("Pause iPhone recording before playing back audio.")
+            return
+        }
+
         do {
             try configureAudioSessionForPlayback()
         } catch {
@@ -391,6 +399,10 @@ final class ChunkPlayer: ObservableObject {
     func resume() {
         guard state == .paused, let player else { return }
         errorMessage = nil
+        if isPhoneRecordingProvider?() == true {
+            errorMessage = "Pause iPhone recording before playing back audio."
+            return
+        }
         do {
             try configureAudioSessionForPlayback()
         } catch {
@@ -713,7 +725,7 @@ struct RecordingsView: View {
                         Label(library.isLoading ? "Loading…" : "No recordings yet",
                               systemImage: "waveform")
                     } description: {
-                        Text("Tap Start day on your watch. Recordings appear here once the watch sends them to your iPhone.")
+                        Text("Tap Start day on your Apple Watch or in the Record tab. Recordings appear here as clips are saved.")
                     }
                     .listRowBackground(Color.clear)
                 }
@@ -792,10 +804,21 @@ struct RecordingsView: View {
             .onReceive(NotificationCenter.default.publisher(for: RecorderLiveNotifications.analysisDidChange)) { _ in
                 Task { await library.load(from: model.coordinator) }
             }
+            .onChange(of: model.isPhoneRecording) { _, recording in
+                if recording && player.state != .idle {
+                    player.stop(clearError: true)
+                }
+            }
             .navigationTitle("Recordings")
             .refreshable { await reload() }
-            .task { await reload() }
-            .onAppear { Task { await library.load(from: model.coordinator) } }
+            .task {
+                player.isPhoneRecordingProvider = { [weak model] in model?.isPhoneRecording ?? false }
+                await reload()
+            }
+            .onAppear {
+                player.isPhoneRecordingProvider = { [weak model] in model?.isPhoneRecording ?? false }
+                Task { await library.load(from: model.coordinator) }
+            }
         }
     }
 

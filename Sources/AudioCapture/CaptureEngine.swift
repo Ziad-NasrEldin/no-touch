@@ -1,15 +1,15 @@
 import Foundation
 import RecorderContracts
 
-/// Events the platform capture engine reports to `WatchCaptureService`.
+/// Events the platform capture engine reports to `ChunkedCaptureService`.
 /// Interruptions are session-level; encode errors arrive per recorder.
-enum CaptureEngineEvent: Sendable {
+public enum CaptureEngineEvent: Sendable {
     case interruptionBegan
     case interruptionEnded(shouldResume: Bool)
     case encodeError(String)
 }
 
-enum MicrophonePermission: Sendable {
+public enum MicrophonePermission: Sendable, Equatable {
     case granted
     case denied
     case undetermined
@@ -17,8 +17,8 @@ enum MicrophonePermission: Sendable {
 
 /// One chunk recorder plus the audio-session surface it needs. The service
 /// only talks to `PlatformCaptureEngine`, so the macOS host build compiles an
-/// honest stub while the watchOS build binds AVFoundation.
-protocol CaptureEngine: Sendable {
+/// honest stub while iOS and watchOS builds bind AVFoundation.
+public protocol CaptureEngine: Sendable {
     static var isSupported: Bool { get }
     static func microphonePermission() -> MicrophonePermission
     static func requestMicrophoneAccess() async -> Bool
@@ -42,19 +42,19 @@ protocol CaptureEngine: Sendable {
     func sampleAveragePower() -> Float?
 }
 
-#if os(watchOS)
+#if os(watchOS) || os(iOS)
 
 import AVFoundation
 
-typealias PlatformCaptureEngine = AVChunkRecorder
+public typealias PlatformCaptureEngine = AVChunkRecorder
 
-/// watchOS engine: `AVAudioRecorder` writing one AAC `.m4a` chunk at a time.
-/// Chosen over AVAudioEngine because it uses the built-in encoder path, keeps
-/// the realtime code trivial, and runs under the supported audio background
-/// mode. Session configuration, permission, and interruption observation are
-/// statics because they are process-wide.
-final class AVChunkRecorder: NSObject, CaptureEngine, AVAudioRecorderDelegate, @unchecked Sendable {
-    static var isSupported: Bool { true }
+/// watchOS / iOS engine: `AVAudioRecorder` writing one AAC `.m4a` chunk at a
+/// time. Chosen over AVAudioEngine because it uses the built-in encoder path,
+/// keeps the realtime code trivial, and runs under the supported audio
+/// background mode. Session configuration, permission, and interruption
+/// observation are statics because they are process-wide.
+public final class AVChunkRecorder: NSObject, CaptureEngine, AVAudioRecorderDelegate, @unchecked Sendable {
+    public static var isSupported: Bool { true }
 
     /// Fresh dictionary per call — `[String: Any]` is not Sendable, so a
     /// shared `static let` would trip strict-concurrency global-state checks.
@@ -68,7 +68,7 @@ final class AVChunkRecorder: NSObject, CaptureEngine, AVAudioRecorderDelegate, @
         ]
     }
 
-    static func microphonePermission() -> MicrophonePermission {
+    public static func microphonePermission() -> MicrophonePermission {
         switch AVAudioApplication.shared.recordPermission {
         case .granted: return .granted
         case .denied: return .denied
@@ -77,7 +77,7 @@ final class AVChunkRecorder: NSObject, CaptureEngine, AVAudioRecorderDelegate, @
         }
     }
 
-    static func requestMicrophoneAccess() async -> Bool {
+    public static func requestMicrophoneAccess() async -> Bool {
         await withCheckedContinuation { continuation in
             AVAudioApplication.requestRecordPermission { granted in
                 continuation.resume(returning: granted)
@@ -85,29 +85,33 @@ final class AVChunkRecorder: NSObject, CaptureEngine, AVAudioRecorderDelegate, @
         }
     }
 
-    static func activateAudioSession() throws {
+    public static func activateAudioSession() throws {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.record, mode: .default)
-        // No setPreferredSampleRate on watchOS — the encoder resamples into
-        // the requested 16 kHz container rate regardless.
+        // The encoder resamples into the requested 16 kHz container rate
+        // regardless of the hardware sample rate.
         try session.setActive(true)
     }
 
-    static func deactivateAudioSession() {
+    public static func deactivateAudioSession() {
+        #if os(iOS)
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        #else
         try? AVAudioSession.sharedInstance().setActive(false)
+        #endif
     }
 
     /// Process-wide interruption stream. The observer intentionally lives for
     /// the process lifetime; the closure only extracts Sendable primitives so
     /// nothing non-Sendable crosses into the service.
-    static func interruptionEvents() -> AsyncStream<CaptureEngineEvent> {
+    public static func interruptionEvents() -> AsyncStream<CaptureEngineEvent> {
         interruptionStream
     }
 
     private static let interruptionStream: AsyncStream<CaptureEngineEvent> = {
         AsyncStream { continuation in
-            // Token intentionally retained by NotificationCenter for the
-            // process lifetime; nothing non-Sendable leaves the closure.
+            // Tokens intentionally retained by NotificationCenter for the
+            // process lifetime; nothing non-Sendable leaves the closures.
             _ = NotificationCenter.default.addObserver(
                 forName: AVAudioSession.interruptionNotification,
                 object: nil,
@@ -128,20 +132,29 @@ final class AVChunkRecorder: NSObject, CaptureEngine, AVAudioRecorderDelegate, @
                     break
                 }
             }
+            #if os(iOS)
+            _ = NotificationCenter.default.addObserver(
+                forName: AVAudioSession.mediaServicesWereResetNotification,
+                object: nil,
+                queue: nil
+            ) { _ in
+                continuation.yield(.interruptionBegan)
+            }
+            #endif
         }
     }()
 
-    let fileURL: URL
+    public let fileURL: URL
     private let onEvent: @Sendable (CaptureEngineEvent) -> Void
     private let lock = NSLock()
     private var recorder: AVAudioRecorder?
 
-    required init(fileURL: URL, onEvent: @escaping @Sendable (CaptureEngineEvent) -> Void) {
+    public required init(fileURL: URL, onEvent: @escaping @Sendable (CaptureEngineEvent) -> Void) {
         self.fileURL = fileURL
         self.onEvent = onEvent
     }
 
-    func prepare() throws {
+    public func prepare() throws {
         let recorder = try AVAudioRecorder(url: fileURL, settings: AVChunkRecorder.settings)
         recorder.isMeteringEnabled = true
         recorder.delegate = self
@@ -151,7 +164,7 @@ final class AVChunkRecorder: NSObject, CaptureEngine, AVAudioRecorderDelegate, @
         lock.unlock()
     }
 
-    func start() throws {
+    public func start() throws {
         lock.lock()
         let recorder = self.recorder
         lock.unlock()
@@ -160,26 +173,26 @@ final class AVChunkRecorder: NSObject, CaptureEngine, AVAudioRecorderDelegate, @
         }
     }
 
-    func stop() {
+    public func stop() {
         lock.lock()
         let recorder = self.recorder
         lock.unlock()
         recorder?.stop()
     }
 
-    var isCapturing: Bool {
+    public var isCapturing: Bool {
         lock.lock()
         defer { lock.unlock() }
         return recorder?.isRecording ?? false
     }
 
-    var capturedDuration: TimeInterval {
+    public var capturedDuration: TimeInterval {
         lock.lock()
         defer { lock.unlock() }
         return recorder?.currentTime ?? 0
     }
 
-    func sampleAveragePower() -> Float? {
+    public func sampleAveragePower() -> Float? {
         lock.lock()
         defer { lock.unlock() }
         guard let recorder, recorder.isRecording else { return nil }
@@ -187,37 +200,37 @@ final class AVChunkRecorder: NSObject, CaptureEngine, AVAudioRecorderDelegate, @
         return recorder.averagePower(forChannel: 0)
     }
 
-    func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
+    public func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
         onEvent(.encodeError(error?.localizedDescription ?? "encode error"))
     }
 }
 
 #else
 
-typealias PlatformCaptureEngine = UnsupportedChunkRecorder
+public typealias PlatformCaptureEngine = UnsupportedChunkRecorder
 
-/// Non-watchOS stub so `swift build` compiles on the host. Every surface
+/// Non-iOS/watchOS stub so `swift build` compiles on the host. Every surface
 /// reports the platform honestly instead of pretending to capture.
-final class UnsupportedChunkRecorder: CaptureEngine, @unchecked Sendable {
-    let fileURL: URL
-    static var isSupported: Bool { false }
-    static func microphonePermission() -> MicrophonePermission { .denied }
-    static func requestMicrophoneAccess() async -> Bool { false }
-    static func activateAudioSession() throws { throw RecorderError.notImplemented }
-    static func deactivateAudioSession() {}
-    static func interruptionEvents() -> AsyncStream<CaptureEngineEvent> {
+public final class UnsupportedChunkRecorder: CaptureEngine, @unchecked Sendable {
+    public let fileURL: URL
+    public static var isSupported: Bool { false }
+    public static func microphonePermission() -> MicrophonePermission { .denied }
+    public static func requestMicrophoneAccess() async -> Bool { false }
+    public static func activateAudioSession() throws { throw RecorderError.notImplemented }
+    public static func deactivateAudioSession() {}
+    public static func interruptionEvents() -> AsyncStream<CaptureEngineEvent> {
         AsyncStream { $0.finish() }
     }
 
-    required init(fileURL: URL, onEvent: @escaping @Sendable (CaptureEngineEvent) -> Void) {
+    public required init(fileURL: URL, onEvent: @escaping @Sendable (CaptureEngineEvent) -> Void) {
         self.fileURL = fileURL
     }
-    func prepare() throws { throw RecorderError.notImplemented }
-    func start() throws { throw RecorderError.notImplemented }
-    func stop() {}
-    var isCapturing: Bool { false }
-    var capturedDuration: TimeInterval { 0 }
-    func sampleAveragePower() -> Float? { nil }
+    public func prepare() throws { throw RecorderError.notImplemented }
+    public func start() throws { throw RecorderError.notImplemented }
+    public func stop() {}
+    public var isCapturing: Bool { false }
+    public var capturedDuration: TimeInterval { 0 }
+    public func sampleAveragePower() -> Float? { nil }
 }
 
 #endif

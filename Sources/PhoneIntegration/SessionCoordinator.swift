@@ -251,6 +251,54 @@ public actor SessionCoordinator {
         try await receiveService.storeReceivedChunk(data: data, metadata: metadata)
     }
 
+    /// File-delivery seam for phone-local capture: feeds the exact same
+    /// `PhoneReceiveService.ingestReceivedFile` pipeline as WatchConnectivity
+    /// (tombstone check → dedup → SHA-256 verification → atomic move into
+    /// `RecorderArchive/chunks/` → SQLite registration → `onChunkStored`
+    /// transcription enqueue + drain kick) and notifies live UI observers.
+    public func ingestLocalChunkFile(
+        at url: URL,
+        metadata: AudioChunkMetadata
+    ) async throws -> TransferAcknowledgment {
+        let ack = try await receiveService.ingestReceivedFile(at: url, metadata: metadata)
+        notifyChunkDidArrive(sessionID: metadata.sessionID)
+        return ack
+    }
+
+    /// Persists a phone-local `RecordingSession` snapshot into the shared
+    /// archive store and notifies live UI observers with `source: "phone"`.
+    public func recordLocalSession(_ session: RecordingSession) async {
+        do {
+            try await store.upsertSession(session)
+            notifyLocalSessionDidChange(session)
+        } catch {
+            await emit(.error, "integration.local_session_upsert_failed", [
+                "session_id": session.id.uuidString,
+                "error": errorClass(error)
+            ])
+        }
+    }
+
+    private nonisolated func notifyChunkDidArrive(sessionID: UUID) {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: RecorderLiveNotifications.chunkDidArrive,
+                object: nil,
+                userInfo: ["sessionID": sessionID]
+            )
+        }
+    }
+
+    private nonisolated func notifyLocalSessionDidChange(_ session: RecordingSession) {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: RecorderLiveNotifications.sessionDidChange,
+                object: nil,
+                userInfo: ["session": session, "source": "phone"]
+            )
+        }
+    }
+
     /// Ask the pipeline to make progress soon. Coalesced: repeated kicks
     /// fold into at most one extra pass after the current one. Nonisolated
     /// so UI/BG callers can fire without awaiting.

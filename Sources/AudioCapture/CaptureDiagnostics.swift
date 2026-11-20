@@ -4,15 +4,14 @@ import Darwin
 #endif
 import RecorderContracts
 
-/// Durable watch-side diagnostics sink. Events are appended to a JSONL file so
-/// capture/transfer/lifecycle evidence survives process death and can be
-/// exported for Gate A (chunk counts, gaps, interruption intervals, timestamps).
+/// Durable capture-side diagnostics sink. Events are appended to a JSONL file
+/// so capture/transfer/lifecycle evidence survives process death.
 /// Payloads must stay non-content-bearing by contract — no audio, no transcript.
 ///
 /// A lock-guarded class rather than an actor so callers never need `await` —
 /// emission must be callable from init, deinit, and sync bookkeeping paths.
 /// Write failures are intentionally silent: diagnostics must never break capture.
-public final class WatchDiagnostics: @unchecked Sendable {
+public final class CaptureDiagnostics: @unchecked Sendable {
     private let fileURL: URL
     private let maxFileBytes: Int
     private let lock = NSLock()
@@ -23,12 +22,16 @@ public final class WatchDiagnostics: @unchecked Sendable {
 
     /// - Parameter maxFileBytes: rolls `events.jsonl` to `events.1.jsonl` past
     ///   this size so a full day of verbose events never grows unbounded.
-    public init(directory: URL? = nil, maxFileBytes: Int = 2_000_000) {
+    public init(
+        directory: URL? = nil,
+        defaultFolderName: String = "WatchCapture",
+        maxFileBytes: Int = 2_000_000
+    ) {
         var paths = directory.flatMap { try? CapturePaths.makeCustom(root: $0) }
-            ?? (try? CapturePaths.makeDefault())
+            ?? (try? CapturePaths.makeDefault(folderName: defaultFolderName))
         if paths == nil {
             let tmp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-                .appendingPathComponent("WatchCapture-\(UUID().uuidString)", isDirectory: true)
+                .appendingPathComponent("\(defaultFolderName)-\(UUID().uuidString)", isDirectory: true)
             paths = (try? CapturePaths.makeCustom(root: tmp)) ?? CapturePaths(root: tmp)
         }
         self.fileURL = paths!.diagnosticsFile
@@ -36,7 +39,7 @@ public final class WatchDiagnostics: @unchecked Sendable {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         self.encoder = encoder
-        self.deviceModel = WatchDiagnostics.machineIdentifier()
+        self.deviceModel = CaptureDiagnostics.machineIdentifier()
         self.osVersion = ProcessInfo.processInfo.operatingSystemVersionString
         if !FileManager.default.fileExists(atPath: fileURL.path) {
             FileManager.default.createFile(atPath: fileURL.path, contents: nil)
@@ -115,8 +118,8 @@ public final class WatchDiagnostics: @unchecked Sendable {
         DiagnosticsReport(deviceModel: deviceModel, osVersion: osVersion, events: allEvents())
     }
 
-    /// Hardware identifier (e.g. `Watch6,6`) via utsname — works on every
-    /// Apple platform without importing WatchKit into the library.
+    /// Hardware identifier (e.g. `Watch6,6`, `iPhone15,3`) via utsname — works
+    /// on every Apple platform without importing UIKit/WatchKit into the library.
     private static func machineIdentifier() -> String {
         var info = utsname()
         uname(&info)

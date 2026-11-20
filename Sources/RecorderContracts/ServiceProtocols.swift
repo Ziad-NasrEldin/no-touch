@@ -13,6 +13,10 @@ public protocol WatchCaptureServiceProtocol: Sendable {
     func stateUpdates() -> AsyncStream<RecordingSession>
 }
 
+/// Device-agnostic alias for the chunked capture contract shared by Apple Watch
+/// and iPhone local capture services.
+public typealias AudioCaptureServiceProtocol = WatchCaptureServiceProtocol
+
 /// Durable watch-side outbox. Chunks stay queued until the phone's
 /// acknowledgment arrives; discarding requires the ack or an explicit deletion.
 public protocol WatchTransferServiceProtocol: Sendable {

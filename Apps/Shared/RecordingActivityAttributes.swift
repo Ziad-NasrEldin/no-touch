@@ -9,13 +9,26 @@ struct RecordingActivityAttributes: ActivityAttributes {
             case recording, paused, interrupted, stopped
         }
 
+        enum Source: String, Codable, Hashable {
+            case watch, phone
+
+            var deviceName: String {
+                switch self {
+                case .watch: return "Apple Watch"
+                case .phone: return "iPhone"
+                }
+            }
+        }
+
         var phase: Phase
-        /// When the recording day started on the watch (drives the timer).
+        /// When the recording day started (drives the timer).
         var startedAt: Date
-        /// Clips received by the iPhone so far today.
+        /// Clips archived on the iPhone so far today.
         var clipCount: Int
-        /// When the iPhone last heard from the watch.
+        /// When the live status last updated.
         var lastHeardAt: Date
+        /// Which device is capturing this session.
+        var source: Source = .watch
     }
 
     var sessionID: String

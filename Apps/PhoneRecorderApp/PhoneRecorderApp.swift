@@ -11,6 +11,7 @@ import PhoneStorage
 @MainActor
 final class PhoneRecorderModel: ObservableObject {
     let coordinator: SessionCoordinator?
+    let phoneCapture: PhoneCaptureService?
     #if os(iOS)
     private let bgScheduler: BackgroundAnalysisScheduler?
     #endif
@@ -41,8 +42,22 @@ final class PhoneRecorderModel: ObservableObject {
     @Published var recentJobError: String?
     @Published var lastDrain = ""
 
+    // MARK: - Phone-local capture state
+    @Published private(set) var phoneSession: RecordingSession?
+    @Published private(set) var phoneFinalizedCount = 0
+    @Published private(set) var phoneArchivedCount = 0
+    @Published private(set) var phonePendingIngestCount = 0
+    @Published private(set) var phoneCaptureBusy = false
+    @Published var phoneCaptureError: String?
+    @Published private(set) var microphonePermission: PhoneMicrophonePermission = PhoneCaptureService.microphonePermission()
+
     let live: LiveRecordingStatus
     private nonisolated(unsafe) var notificationObservers: [NSObjectProtocol] = []
+    private nonisolated(unsafe) var phoneCaptureObserverTask: Task<Void, Never>?
+
+    var isPhoneRecording: Bool {
+        phoneSession?.state == .recording
+    }
 
     var allModelsReady: Bool {
         speechReadiness == .ready && textReadiness == .ready
@@ -51,20 +66,30 @@ final class PhoneRecorderModel: ObservableObject {
     init() {
         if let coordinator = try? SessionCoordinator.makeDefault() {
             self.coordinator = coordinator
-            live = LiveRecordingStatus(coordinator: coordinator)
+            let phoneCapture = PhoneCaptureService(
+                coordinator: coordinator,
+                beforeActivateAudioSession: {
+                    await MainActor.run {
+                        BackgroundKeepAlive.shared.stop()
+                    }
+                }
+            )
+            self.phoneCapture = phoneCapture
+            live = LiveRecordingStatus(coordinator: coordinator, phoneCapture: phoneCapture)
             #if os(iOS)
             let scheduler = BackgroundAnalysisScheduler(coordinator: coordinator)
             scheduler.register()
             bgScheduler = scheduler
-            // Run inference only while the app is in the foreground; when a
-            // watch clip wakes the app in the background, hand the work to a
-            // BGProcessingTask instead (the OS runs it when it can).
-            Task {
+            // Run inference in the foreground, while kept awake for the watch,
+            // or while iPhone local capture holds the active audio session.
+            // MLX text generation remains foreground-only (GPU restriction).
+            Task { [weak self] in
                 await coordinator.setDrainPolicy(
-                    // Foreground, or kept awake while the watch records.
-                    canDrainNow: {
+                    canDrainNow: { [weak self] in
                         await MainActor.run {
-                            UIApplication.shared.applicationState != .background || BackgroundKeepAlive.isRunning
+                            UIApplication.shared.applicationState != .background
+                                || BackgroundKeepAlive.isRunning
+                                || (self?.isPhoneRecording ?? false)
                         }
                     },
                     onDeferredWork: { scheduler.schedule() },
@@ -78,6 +103,7 @@ final class PhoneRecorderModel: ObservableObject {
             engineLabel = "speech=\(coordinator.speechEngineIdentifier) text=\(coordinator.textEngineIdentifier)"
         } else {
             coordinator = nil
+            phoneCapture = nil
             live = LiveRecordingStatus(coordinator: nil)
             #if os(iOS)
             bgScheduler = nil
@@ -94,17 +120,35 @@ final class PhoneRecorderModel: ObservableObject {
         notificationObservers.append(center.addObserver(
             forName: RecorderLiveNotifications.chunkDidArrive, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in await self?.refresh() }
+            Task { @MainActor in
+                await self?.refreshPhoneCaptureCounts()
+                await self?.refresh()
+            }
         })
+
+        if let phoneCapture {
+            phoneCaptureObserverTask = Task { [weak self, phoneCapture] in
+                await self?.refreshPhoneCaptureState()
+                for await update in phoneCapture.stateUpdates() {
+                    guard let self else { break }
+                    self.phoneSession = update
+                    self.microphonePermission = PhoneCaptureService.microphonePermission()
+                    await self.refreshPhoneCaptureCounts()
+                }
+            }
+        }
 
         Task { await observeInstalls() }
         Task { [weak self] in
             await self?.coordinator?.activate()
+            await self?.phoneCapture?.activate()
+            await self?.refreshPhoneCaptureState()
             await self?.refresh()
         }
     }
 
     deinit {
+        phoneCaptureObserverTask?.cancel()
         for observer in notificationObservers {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -308,15 +352,108 @@ final class PhoneRecorderModel: ObservableObject {
         }
     }
 
+    // MARK: - Phone-local capture controls
+
+    func startPhoneRecording() {
+        runPhoneCaptureAction { try await $0.startSession() }
+    }
+
+    func pausePhoneRecording() {
+        runPhoneCaptureAction { try await $0.pauseSession() }
+    }
+
+    func resumePhoneRecording() {
+        runPhoneCaptureAction { try await $0.resumeSession() }
+    }
+
+    func stopPhoneRecording() {
+        runPhoneCaptureAction { try await $0.stopSession() }
+    }
+
+    func refreshPhoneCaptureState() async {
+        microphonePermission = PhoneCaptureService.microphonePermission()
+        guard let phoneCapture else { return }
+        phoneSession = await phoneCapture.currentSession()
+        await refreshPhoneCaptureCounts()
+    }
+
+    func refreshPhoneCaptureCounts() async {
+        guard let phoneCapture, let id = phoneSession?.id else {
+            phoneFinalizedCount = 0
+            phoneArchivedCount = 0
+            phonePendingIngestCount = 0
+            return
+        }
+        phoneFinalizedCount = await phoneCapture.finalizedChunks(sessionID: id).count
+        phonePendingIngestCount = await phoneCapture.pendingIngestCount(sessionID: id)
+        if let coordinator {
+            phoneArchivedCount = await coordinator.receivedChunks(sessionID: id).count
+        }
+    }
+
+    private func runPhoneCaptureAction(
+        _ action: @escaping (PhoneCaptureService) async throws -> RecordingSession
+    ) {
+        guard !phoneCaptureBusy else { return }
+        guard let phoneCapture else {
+            phoneCaptureError = "Phone recording service is unavailable."
+            return
+        }
+        phoneCaptureBusy = true
+        phoneCaptureError = nil
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.phoneCaptureBusy = false }
+            do {
+                let updated = try await action(phoneCapture)
+                self.phoneSession = updated
+                self.microphonePermission = PhoneCaptureService.microphonePermission()
+                await self.refreshPhoneCaptureCounts()
+                await self.refresh()
+            } catch {
+                self.microphonePermission = PhoneCaptureService.microphonePermission()
+                self.phoneSession = await phoneCapture.currentSession()
+                self.phoneCaptureError = Self.captureErrorMessage(for: error)
+                await self.refreshPhoneCaptureCounts()
+            }
+        }
+    }
+
+    private static func captureErrorMessage(for error: Error) -> String {
+        switch error as? RecorderError {
+        case .microphoneDenied:
+            return "Microphone access is denied. Enable Microphone permission in iPhone Settings to record."
+        case .lowStorage:
+            return "Not enough free storage on this iPhone to record audio."
+        case .notImplemented:
+            return "Audio capture is not supported on this platform."
+        case .storageFailure:
+            return "Could not initialize audio recording on disk."
+        case .invalidState(let state):
+            return "Cannot perform that action while session is \(state.rawValue)."
+        default:
+            return error.localizedDescription
+        }
+    }
+
     func scenePhaseChanged(_ phase: ScenePhase) {
         switch phase {
         case .active:
             Task { [weak self] in
                 await self?.coordinator?.activate()
+                await self?.phoneCapture?.appDidBecomeActive()
+                await self?.refreshPhoneCaptureState()
                 await self?.live.reloadFromArchive()
                 await self?.refresh()
             }
+        case .inactive:
+            Task { [weak self] in
+                await self?.phoneCapture?.appWillResignActive()
+            }
         case .background:
+            Task { [weak self] in
+                await self?.phoneCapture?.appDidEnterBackground()
+            }
             #if os(iOS)
             bgScheduler?.schedule()
             #endif
@@ -347,6 +484,8 @@ struct PhoneRecorderApp: App {
             TabView {
                 RecordingsView(model: model)
                     .tabItem { Label("Recordings", systemImage: "waveform") }
+                NavigationStack { RecordView(model: model) }
+                    .tabItem { Label("Record", systemImage: "mic.fill") }
                 NavigationStack { ContentView(model: model) }
                     .tabItem { Label("Status", systemImage: "gearshape") }
             }

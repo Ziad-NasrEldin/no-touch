@@ -10,6 +10,7 @@ let package = Package(
     ],
     products: [
         .library(name: "RecorderContracts", targets: ["RecorderContracts"]),
+        .library(name: "AudioCapture", targets: ["AudioCapture"]),
         .library(name: "WatchCapture", targets: ["WatchCapture"]),
         .library(name: "PhoneAI", targets: ["PhoneAI"]),
         .library(name: "PhoneStorage", targets: ["PhoneStorage"]),
@@ -23,7 +24,8 @@ let package = Package(
     ],
     targets: [
         .target(name: "RecorderContracts"),
-        .target(name: "WatchCapture", dependencies: ["RecorderContracts"]),
+        .target(name: "AudioCapture", dependencies: ["RecorderContracts"]),
+        .target(name: "WatchCapture", dependencies: ["RecorderContracts", "AudioCapture"]),
         .target(
             name: "PhoneAI",
             dependencies: [
@@ -37,7 +39,7 @@ let package = Package(
         .target(name: "PhoneStorage", dependencies: ["RecorderContracts"]),
         .target(
             name: "PhoneIntegration",
-            dependencies: ["RecorderContracts", "PhoneAI", "PhoneStorage"]
+            dependencies: ["RecorderContracts", "AudioCapture", "PhoneAI", "PhoneStorage"]
         )
     ]
 )
