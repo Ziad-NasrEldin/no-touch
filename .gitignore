@@ -9,3 +9,5 @@ build/
 *.caf
 *.aac
 Recordings/
+.swiftpm/
+xcuserdata/

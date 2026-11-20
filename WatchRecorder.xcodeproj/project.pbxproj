@@ -17,7 +17,59 @@
 		F0F0F0F0F0F0F0F0F0F0F053 /* PhoneIntegration in Frameworks */ = {isa = PBXBuildFile; productRef = F0F0F0F0F0F0F0F0F0F0F074 /* PhoneIntegration */; };
 		F0F0F0F0F0F0F0F0F0F0F054 /* RecorderContracts in Frameworks */ = {isa = PBXBuildFile; productRef = F0F0F0F0F0F0F0F0F0F0F075 /* RecorderContracts */; };
 		F0F0F0F0F0F0F0F0F0F0F055 /* WatchCapture in Frameworks */ = {isa = PBXBuildFile; productRef = F0F0F0F0F0F0F0F0F0F0F071 /* WatchCapture */; };
+		F0F0F0F0F0F0F0F0F0F0F056 /* WatchRecorderApp.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = F0F0F0F0F0F0F0F0F0F0F047 /* WatchRecorderApp.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		F0F0F0F0F0F0F0F0F0F0F0E2 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F0F0F0F0F0F0F0F0F0F0F0E0 /* Assets.xcassets */; };
+		F0F0F0F0F0F0F0F0F0F0F0E3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F0F0F0F0F0F0F0F0F0F0F0E1 /* Assets.xcassets */; };
+		F0F0F0F0F0F0F0F0F0F0F0E5 /* RecordingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0F0F0F0F0F0F0F0F0F0F0E4 /* RecordingsView.swift */; };
+		A1A1A1A1A1A1A1A1A1A1A101 /* RecordingActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1A110 /* RecordingActivityAttributes.swift */; };
+		A1A1A1A1A1A1A1A1A1A1A102 /* RecordingActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1A110 /* RecordingActivityAttributes.swift */; };
+		A1A1A1A1A1A1A1A1A1A1A103 /* RecorderWidgetsBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1A111 /* RecorderWidgetsBundle.swift */; };
+		A1A1A1A1A1A1A1A1A1A1A104 /* LiveRecordingStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1A112 /* LiveRecordingStatus.swift */; };
+		A1A1A1A1A1A1A1A1A1A1A105 /* RecorderWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1A113 /* RecorderWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A1A1A1A1A1A1A1A1A1A1A106 /* BackgroundKeepAlive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A1A1A1A1A1A1A1A115 /* BackgroundKeepAlive.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		F0F0F0F0F0F0F0F0F0F0F0D0 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F0F0F0F0F0F0F0F0F0F0F001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F0F0F0F0F0F0F0F0F0F0F011;
+			remoteInfo = WatchRecorderApp;
+		};
+		A1A1A1A1A1A1A1A1A1A1A120 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F0F0F0F0F0F0F0F0F0F0F001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A1A1A1A1A1A1A1A1A1A1A130;
+			remoteInfo = RecorderWidgets;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		F0F0F0F0F0F0F0F0F0F0F0D1 /* Embed Watch Content */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
+			dstSubfolderSpec = 16;
+			files = (
+				F0F0F0F0F0F0F0F0F0F0F056 /* WatchRecorderApp.app in Embed Watch Content */,
+			);
+			name = "Embed Watch Content";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1A1A1A1A1A1A1A1A1A1A121 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				A1A1A1A1A1A1A1A1A1A1A105 /* RecorderWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		F0F0F0F0F0F0F0F0F0F0F040 /* PhoneRecorderApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneRecorderApp.swift; sourceTree = "<group>"; };
@@ -28,6 +80,15 @@
 		F0F0F0F0F0F0F0F0F0F0F045 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		F0F0F0F0F0F0F0F0F0F0F046 /* PhoneRecorderApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PhoneRecorderApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F0F0F0F0F0F0F0F0F0F0F047 /* WatchRecorderApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WatchRecorderApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F0F0F0F0F0F0F0F0F0F0F0E0 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Apps/PhoneRecorderApp/Assets.xcassets; sourceTree = SOURCE_ROOT; };
+		F0F0F0F0F0F0F0F0F0F0F0E1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Apps/WatchRecorderApp/Assets.xcassets; sourceTree = SOURCE_ROOT; };
+		F0F0F0F0F0F0F0F0F0F0F0E4 /* RecordingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingsView.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A1A110 /* RecordingActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingActivityAttributes.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A1A111 /* RecorderWidgetsBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecorderWidgetsBundle.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A1A112 /* LiveRecordingStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveRecordingStatus.swift; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A1A113 /* RecorderWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = RecorderWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1A1A1A1A1A1A1A1A1A1A114 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A1A1A1A1A1A1A1A1A1A1A115 /* BackgroundKeepAlive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundKeepAlive.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -51,12 +112,21 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A1A1A1A1A1A1A1A1A1A1A132 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		F0F0F0F0F0F0F0F0F0F0F020 /*  */ = {
 			isa = PBXGroup;
 			children = (
+				F0F0F0F0F0F0F0F0F0F0F0E0 /* Assets.xcassets */,
+				F0F0F0F0F0F0F0F0F0F0F0E1 /* Assets.xcassets */,
 				F0F0F0F0F0F0F0F0F0F0F021 /* Apps */,
 				F0F0F0F0F0F0F0F0F0F0F026 /* Frameworks */,
 				F0F0F0F0F0F0F0F0F0F0F025 /* Products */,
@@ -68,6 +138,8 @@
 			children = (
 				F0F0F0F0F0F0F0F0F0F0F022 /* PhoneRecorderApp */,
 				F0F0F0F0F0F0F0F0F0F0F023 /* WatchRecorderApp */,
+				A1A1A1A1A1A1A1A1A1A1A140 /* Shared */,
+				A1A1A1A1A1A1A1A1A1A1A141 /* RecorderWidgets */,
 			);
 			path = Apps;
 			sourceTree = "<group>";
@@ -77,6 +149,9 @@
 			children = (
 				F0F0F0F0F0F0F0F0F0F0F040 /* PhoneRecorderApp.swift */,
 				F0F0F0F0F0F0F0F0F0F0F041 /* ContentView.swift */,
+				F0F0F0F0F0F0F0F0F0F0F0E4 /* RecordingsView.swift */,
+				A1A1A1A1A1A1A1A1A1A1A112 /* LiveRecordingStatus.swift */,
+				A1A1A1A1A1A1A1A1A1A1A115 /* BackgroundKeepAlive.swift */,
 				F0F0F0F0F0F0F0F0F0F0F044 /* Info.plist */,
 			);
 			path = PhoneRecorderApp;
@@ -97,6 +172,7 @@
 			children = (
 				F0F0F0F0F0F0F0F0F0F0F046 /* PhoneRecorderApp.app */,
 				F0F0F0F0F0F0F0F0F0F0F047 /* WatchRecorderApp.app */,
+				A1A1A1A1A1A1A1A1A1A1A113 /* RecorderWidgets.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -106,6 +182,23 @@
 			children = (
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		A1A1A1A1A1A1A1A1A1A1A140 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				A1A1A1A1A1A1A1A1A1A1A110 /* RecordingActivityAttributes.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		A1A1A1A1A1A1A1A1A1A1A141 /* RecorderWidgets */ = {
+			isa = PBXGroup;
+			children = (
+				A1A1A1A1A1A1A1A1A1A1A111 /* RecorderWidgetsBundle.swift */,
+				A1A1A1A1A1A1A1A1A1A1A114 /* Info.plist */,
+			);
+			path = RecorderWidgets;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -118,10 +211,14 @@
 				F0F0F0F0F0F0F0F0F0F0F080 /* Sources */,
 				F0F0F0F0F0F0F0F0F0F0F090 /* Frameworks */,
 				F0F0F0F0F0F0F0F0F0F0F0A0 /* Resources */,
+				F0F0F0F0F0F0F0F0F0F0F0D1 /* Embed Watch Content */,
+				A1A1A1A1A1A1A1A1A1A1A121 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				F0F0F0F0F0F0F0F0F0F0F0D2 /* PBXTargetDependency */,
+				A1A1A1A1A1A1A1A1A1A1A122 /* PBXTargetDependency */,
 			);
 			name = PhoneRecorderApp;
 			packageProductDependencies = (
@@ -154,6 +251,23 @@
 			productName = WatchRecorderApp;
 			productReference = F0F0F0F0F0F0F0F0F0F0F047 /* WatchRecorderApp.app */;
 			productType = "com.apple.product-type.application";
+		};
+		A1A1A1A1A1A1A1A1A1A1A130 /* RecorderWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1A1A1A1A1A1A1A1A1A1A150 /* Build configuration list for PBXNativeTarget "RecorderWidgets" */;
+			buildPhases = (
+				A1A1A1A1A1A1A1A1A1A1A131 /* Sources */,
+				A1A1A1A1A1A1A1A1A1A1A132 /* Frameworks */,
+				A1A1A1A1A1A1A1A1A1A1A133 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = RecorderWidgets;
+			productName = RecorderWidgets;
+			productReference = A1A1A1A1A1A1A1A1A1A1A113 /* RecorderWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -193,19 +307,42 @@
 			targets = (
 				F0F0F0F0F0F0F0F0F0F0F010 /* PhoneRecorderApp */,
 				F0F0F0F0F0F0F0F0F0F0F011 /* WatchRecorderApp */,
+				A1A1A1A1A1A1A1A1A1A1A130 /* RecorderWidgets */,
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXTargetDependency section */
+		F0F0F0F0F0F0F0F0F0F0F0D2 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F0F0F0F0F0F0F0F0F0F0F011 /* WatchRecorderApp */;
+			targetProxy = F0F0F0F0F0F0F0F0F0F0F0D0 /* PBXContainerItemProxy */;
+		};
+		A1A1A1A1A1A1A1A1A1A1A122 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A1A1A1A1A1A1A1A1A1A1A130 /* RecorderWidgets */;
+			targetProxy = A1A1A1A1A1A1A1A1A1A1A120 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin PBXResourcesBuildPhase section */
 		F0F0F0F0F0F0F0F0F0F0F0A0 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F0F0F0F0F0F0F0F0F0F0F0E2 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		F0F0F0F0F0F0F0F0F0F0F0A1 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F0F0F0F0F0F0F0F0F0F0F0E3 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1A1A1A1A1A1A1A1A1A1A133 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -221,6 +358,10 @@
 			files = (
 				F0F0F0F0F0F0F0F0F0F0F030 /* PhoneRecorderApp.swift in Sources */,
 				F0F0F0F0F0F0F0F0F0F0F031 /* ContentView.swift in Sources */,
+				F0F0F0F0F0F0F0F0F0F0F0E5 /* RecordingsView.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A1A101 /* RecordingActivityAttributes.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A1A104 /* LiveRecordingStatus.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A1A106 /* BackgroundKeepAlive.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -230,6 +371,15 @@
 			files = (
 				F0F0F0F0F0F0F0F0F0F0F032 /* WatchRecorderApp.swift in Sources */,
 				F0F0F0F0F0F0F0F0F0F0F033 /* ContentView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1A1A1A1A1A1A1A1A1A1A131 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1A1A1A1A1A1A1A1A1A1A103 /* RecorderWidgetsBundle.swift in Sources */,
+				A1A1A1A1A1A1A1A1A1A1A102 /* RecordingActivityAttributes.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -356,9 +506,10 @@
 		F0F0F0F0F0F0F0F0F0F0F0C2 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				CURRENT_PROJECT_VERSION = 7;
+				DEVELOPMENT_TEAM = 377QC32T9T;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Apps/PhoneRecorderApp/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -367,7 +518,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1;
-				PRODUCT_BUNDLE_IDENTIFIER = com.placeholder.PhoneRecorder;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ziadahmed.WatchRecorder;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -378,9 +529,10 @@
 		F0F0F0F0F0F0F0F0F0F0F0C3 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				CURRENT_PROJECT_VERSION = 7;
+				DEVELOPMENT_TEAM = 377QC32T9T;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Apps/PhoneRecorderApp/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -389,7 +541,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1;
-				PRODUCT_BUNDLE_IDENTIFIER = com.placeholder.PhoneRecorder;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ziadahmed.WatchRecorder;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -400,9 +552,10 @@
 		F0F0F0F0F0F0F0F0F0F0F0C4 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				CURRENT_PROJECT_VERSION = 7;
+				DEVELOPMENT_TEAM = 377QC32T9T;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Apps/WatchRecorderApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -410,9 +563,10 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1;
-				PRODUCT_BUNDLE_IDENTIFIER = com.placeholder.PhoneRecorder.watchkitapp;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ziadahmed.WatchRecorder.watchkitapp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = 4;
 				WATCHOS_DEPLOYMENT_TARGET = 10.0;
@@ -422,9 +576,10 @@
 		F0F0F0F0F0F0F0F0F0F0F0C5 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				CURRENT_PROJECT_VERSION = 7;
+				DEVELOPMENT_TEAM = 377QC32T9T;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Apps/WatchRecorderApp/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -432,12 +587,61 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1;
-				PRODUCT_BUNDLE_IDENTIFIER = com.placeholder.PhoneRecorder.watchkitapp;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ziadahmed.WatchRecorder.watchkitapp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = 4;
 				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Release;
+		};
+		A1A1A1A1A1A1A1A1A1A1A151 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 7;
+				DEVELOPMENT_TEAM = 377QC32T9T;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Apps/RecorderWidgets/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ziadahmed.WatchRecorder.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A1A1A1A1A1A1A1A1A1A1A152 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 7;
+				DEVELOPMENT_TEAM = 377QC32T9T;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Apps/RecorderWidgets/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ziadahmed.WatchRecorder.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
 		};
@@ -467,6 +671,15 @@
 			buildConfigurations = (
 				F0F0F0F0F0F0F0F0F0F0F0C4 /* Debug */,
 				F0F0F0F0F0F0F0F0F0F0F0C5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A1A1A1A1A1A1A1A1A1A1A150 /* Build configuration list for PBXNativeTarget "RecorderWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1A1A1A1A1A1A1A1A1A1A151 /* Debug */,
+				A1A1A1A1A1A1A1A1A1A1A152 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

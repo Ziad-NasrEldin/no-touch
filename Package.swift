@@ -29,6 +29,7 @@ let package = Package(
             dependencies: [
                 "RecorderContracts",
                 .product(name: "WhisperKit", package: "argmax-oss-swift"),
+                .product(name: "SpeakerKit", package: "argmax-oss-swift"),
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm")
             ]

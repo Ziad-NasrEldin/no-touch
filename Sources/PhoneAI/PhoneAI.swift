@@ -84,7 +84,11 @@ public enum PhoneAI {
     }
 
     private static func defaultTextEngine(descriptor: ModelDescriptor) -> any TextIntelligenceEngine {
-        #if canImport(MLXLLM) && canImport(MLXLMCommon)
+        // MLX's C++ Metal device initializer aborts (SIGABRT) on iOS Simulator
+        // because the simulator lacks MLX's Metal runtime; keep real MLX on
+        // physical Apple Silicon devices and fall back honestly to the
+        // deterministic extractive engine on simulator.
+        #if canImport(MLXLLM) && canImport(MLXLMCommon) && !targetEnvironment(simulator)
         if case .mlxRepository = descriptor.installMethod {
             return MLXChatTextEngine(descriptor: descriptor)
         }

@@ -35,6 +35,11 @@ public actor MLXChatTextEngine: TextIntelligenceEngine {
 
     public func load(installedAt directory: URL?) async throws {
         if container != nil { return }
+        #if targetEnvironment(simulator)
+        throw PhoneAIError.unsupportedInstallMethod(
+            "MLX Metal inference is unavailable on iOS Simulator — run on a physical Apple Silicon iPhone"
+        )
+        #else
         _ = LLMRegistry.shared // force MLXLLM trampoline registration
         if let directory {
             container = try await loadModelContainer(directory: directory) { _ in }
@@ -43,6 +48,7 @@ public actor MLXChatTextEngine: TextIntelligenceEngine {
             // HF cache; still fully offline once cached.
             container = try await loadModelContainer(id: hubID, revision: revision) { _ in }
         }
+        #endif
     }
 
     public func unload() async {

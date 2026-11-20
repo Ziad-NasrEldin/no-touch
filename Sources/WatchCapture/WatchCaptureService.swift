@@ -411,8 +411,10 @@ public actor WatchCaptureService: WatchCaptureServiceProtocol {
         let oldMonoStart = chunkMonoStart
         let wallEnd = Date()
         let monoEnd = Monotonic.now()
-        old.stop()
+        // Read before stop(): AVAudioRecorder.currentTime resets to 0 once
+        // stopped, which sealed every clip with a 0 s duration.
         let duration = old.capturedDuration
+        old.stop()
         let wallStart = Date()
         let monoStart = Monotonic.now()
         do {
@@ -453,8 +455,8 @@ public actor WatchCaptureService: WatchCaptureServiceProtocol {
     private func sealActiveChunk(endedAt wallEnd: Date, via: String) {
         guard let engine else { return }
         let monoEnd = Monotonic.now()
-        engine.stop()
         let duration = engine.capturedDuration
+        engine.stop()
         sealChunk(url: activeChunkURL,
                   wallStart: chunkWallStart, wallEnd: wallEnd,
                   monoStart: chunkMonoStart, monoEnd: monoEnd,

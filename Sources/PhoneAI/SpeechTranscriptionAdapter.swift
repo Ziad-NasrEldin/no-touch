@@ -67,11 +67,15 @@ public actor SpeechTranscriptionAdapter: SpeechTranscriptionAdapterProtocol, Eng
     ) async throws -> [TranscriptSegment] {
         try Task.checkCancellation()
 
-        let decoded = try AudioChunkDecoder.decode(
-            fileAt: audioFileURL,
-            targetSampleRate: configuration.targetSampleRate,
-            maxSeconds: configuration.maxAudioSeconds
-        )
+        let targetRate = configuration.targetSampleRate
+        let maxSeconds = configuration.maxAudioSeconds
+        let decoded = try await Task.detached(priority: .userInitiated) {
+            try AudioChunkDecoder.decode(
+                fileAt: audioFileURL,
+                targetSampleRate: targetRate,
+                maxSeconds: maxSeconds
+            )
+        }.value
         guard !decoded.samples.isEmpty else { return [] }
 
         let installedDirectory = try await readyInstallDirectory()
@@ -144,11 +148,10 @@ public actor SpeechTranscriptionAdapter: SpeechTranscriptionAdapterProtocol, Eng
 
     private func readyInstallDirectory() async throws -> URL? {
         guard engine.requiresModelInstall else { return nil }
-        let snapshot = await installController.snapshot()
-        guard snapshot.state == .ready, let path = snapshot.installDirectory else {
+        guard let directory = await installController.resolvedInstallDirectory() else {
             throw RecorderError.modelNotReady
         }
-        return URL(fileURLWithPath: path, isDirectory: true)
+        return directory
     }
 
     private func map(
@@ -187,7 +190,8 @@ public actor SpeechTranscriptionAdapter: SpeechTranscriptionAdapterProtocol, Eng
                 wallStartTime: chunk.integrity.wallStartedAt.addingTimeInterval(start),
                 text: trimmedText,
                 languageSpans: spans,
-                confidence: confidence
+                confidence: confidence,
+                speakerID: engineSegment.speakerID
             ))
         }
         return output

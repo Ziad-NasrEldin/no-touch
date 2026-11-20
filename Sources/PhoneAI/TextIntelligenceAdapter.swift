@@ -233,22 +233,17 @@ public actor TextIntelligenceAdapter: TextIntelligenceAdapterProtocol, EngineBac
 
     private func readyInstallDirectory() async throws -> URL? {
         guard engine.requiresModelInstall else { return nil }
-        let snapshot = await installController.snapshot()
-        guard snapshot.state == .ready, let path = snapshot.installDirectory else {
+        guard let directory = await installController.resolvedInstallDirectory() else {
             throw RecorderError.modelNotReady
         }
-        return URL(fileURLWithPath: path, isDirectory: true)
+        return directory
     }
 
     /// For refinement: nil means "no engine needed" (model-free) or "not
     /// installed" (caller falls back to heuristic).
     private func readyInstallDirectoryIfAny() async throws -> URL? {
         guard engine.requiresModelInstall else { return nil }
-        let snapshot = await installController.snapshot()
-        guard snapshot.state == .ready, let path = snapshot.installDirectory else {
-            return nil
-        }
-        return URL(fileURLWithPath: path, isDirectory: true)
+        return await installController.resolvedInstallDirectory()
     }
 
     /// Reviews boundary candidates through the engine. Failures degrade to

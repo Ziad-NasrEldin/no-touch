@@ -1,6 +1,16 @@
 import Foundation
 import RecorderContracts
 
+/// Posted on the main notification center when live recording or analysis state changes.
+public enum RecorderLiveNotifications {
+    /// userInfo["session"]: RecordingSession
+    public static let sessionDidChange = Notification.Name("RecorderSessionDidChange")
+    /// userInfo["sessionID"]: UUID
+    public static let chunkDidArrive = Notification.Name("RecorderChunkDidArrive")
+    /// Posted whenever transcription, regrouping, or summary generation makes progress or updates job state.
+    public static let analysisDidChange = Notification.Name("RecorderAnalysisDidChange")
+}
+
 #if os(iOS) && canImport(WatchConnectivity)
 import WatchConnectivity
 
@@ -182,6 +192,10 @@ extension WatchConnectivityReceiveTransport: WCSessionDelegate {
                     at: landing, metadata: metadata
                 )
                 send(acknowledgment: ack)
+                NotificationCenter.default.post(
+                    name: RecorderLiveNotifications.chunkDidArrive, object: nil,
+                    userInfo: ["sessionID": metadata.sessionID]
+                )
                 emitTransferDiag(name: "transfer.ack_sent", payload: [
                     "chunk_id": metadata.id.uuidString,
                     "status": ack.status.rawValue,
@@ -234,6 +248,12 @@ extension WatchConnectivityReceiveTransport: WCSessionDelegate {
         handleSessionPayload(applicationContext)
     }
 
+    /// Live wake-up path: the watch also sends the snapshot as a message
+    /// when the phone is reachable, which wakes this app in the background.
+    public func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        handleSessionPayload(message)
+    }
+
     /// Same payload shape accepted on `userInfo` deliveries — the decoder is
     /// shared so either channel lands the session mirror row.
     public func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any]) {
@@ -248,6 +268,10 @@ extension WatchConnectivityReceiveTransport: WCSessionDelegate {
         Task {
             do {
                 try await archiveStore.upsertSession(snapshot)
+                NotificationCenter.default.post(
+                    name: RecorderLiveNotifications.sessionDidChange, object: nil,
+                    userInfo: ["session": snapshot]
+                )
                 emitTransferDiag(name: "transfer.session_received", payload: [
                     "session_id": snapshot.id.uuidString,
                     "state": snapshot.state.rawValue,

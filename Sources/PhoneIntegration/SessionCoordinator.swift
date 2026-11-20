@@ -39,6 +39,33 @@ public actor SessionCoordinator {
     private let runner: AnalysisJobRunner
     private var drainScheduled = false
     private var drainAgain = false
+    private var drainInFlight = false
+    private var drainWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Gate for opportunistic drains (chunk-arrival kicks, foreground
+    /// activation). The app returns false while it is in the background so
+    /// GPU/ANE-heavy inference never starts during a short WatchConnectivity
+    /// wake — that work belongs to the BGProcessingTask, which calls
+    /// `processAnalysisQueue` directly.
+    private var canDrainNow: @Sendable () async -> Bool = { true }
+    /// Called when work is queued but this process can't run it now.
+    private var onDeferredWork: @Sendable () -> Void = {}
+    /// The text model (MLX) runs on the GPU, which iOS only allows in the
+    /// foreground. While this returns false, grouping + summaries wait and
+    /// only transcription (Neural Engine) runs.
+    private var allowsTextModel: @Sendable () async -> Bool = { true }
+
+    /// Jobs that failed fewer times than this are retried automatically.
+    public static let maxAutomaticAttempts = 3
+
+    public func setDrainPolicy(
+        canDrainNow: @escaping @Sendable () async -> Bool,
+        onDeferredWork: @escaping @Sendable () -> Void,
+        allowsTextModel: @escaping @Sendable () async -> Bool = { true }
+    ) {
+        self.canDrainNow = canDrainNow
+        self.onDeferredWork = onDeferredWork
+        self.allowsTextModel = allowsTextModel
+    }
 
     #if os(iOS) && canImport(WatchConnectivity)
     private let transport: WatchConnectivityReceiveTransport
@@ -171,7 +198,22 @@ public actor SessionCoordinator {
         transport.flushDeletionIntents()
         #endif
         await reconcilePendingTranscriptions()
+        await retryTransientFailures()
         scheduleDrain()
+    }
+
+    /// Failed jobs are usually transient here (model not installed yet,
+    /// inference attempted while backgrounded, memory pressure). Requeue
+    /// those under the attempt cap so they finish without a manual step;
+    /// a job that keeps failing stops after `maxAutomaticAttempts`.
+    public func retryTransientFailures() async {
+        guard let failed = try? await store.analysisJobs(state: .failed) else { return }
+        for job in failed where job.attemptCount < Self.maxAutomaticAttempts {
+            var revived = job
+            revived.state = .queued
+            revived.updatedAt = Date()
+            try? await store.updateAnalysisJob(revived)
+        }
     }
 
     /// Stops the drain loop cooperatively (in-flight job completes; queued
@@ -221,12 +263,20 @@ public actor SessionCoordinator {
     /// One bounded pass: drain transcription jobs → regroup every session
     /// that gained segments or still holds ungrouped ones → drain the
     /// intelligence jobs that regrouping enqueued.
+    /// Serialized via `acquireDrainSlot()` so concurrent callers (manual tap,
+    /// automatic chunk kick, BGProcessingTask) never interleave or unload an
+    /// engine while another pass is actively using it.
     public func processAnalysisQueue(maxJobsPerKind: Int = 24) async -> DrainSummary {
+        await acquireDrainSlot()
+        defer { releaseDrainSlot() }
+        if Task.isCancelled { return DrainSummary() }
+
         var summary = DrainSummary()
 
         // Phase 1 — transcription drain; track which sessions gained output.
         var dirtySessions = Set<UUID>()
-        while summary.transcriptionJobs < maxJobsPerKind {
+        let speechReady = await transcriber.readiness() == .ready
+        while speechReady, summary.transcriptionJobs < maxJobsPerKind, !Task.isCancelled {
             let job: AnalysisJob?
             do {
                 job = try await runner.runNextQueuedJob(kind: .transcription)
@@ -240,6 +290,7 @@ public actor SessionCoordinator {
                let metadata = try? await store.chunkMetadata(id: chunkID) {
                 dirtySessions.insert(metadata.sessionID)
             }
+            notifyAnalysisDidChange()
         }
 
         // Phase boundary (R1-4): the speech engine's work this pass is
@@ -249,6 +300,16 @@ public actor SessionCoordinator {
         // in-flight inference); the engine lazily reloads on next use.
         await transcriber.unloadEngine()
 
+        // Phases 2–3 need the GPU-backed text model; when it isn't allowed
+        // (app backgrounded) they run on the next foreground pass.
+        guard await allowsTextModel() else {
+            await emit(.info, "integration.drain_completed", [
+                "transcription_jobs": "\(summary.transcriptionJobs)",
+                "text_phases": "deferred_background",
+            ])
+            return summary
+        }
+
         // Phase 2 — regroup dirty sessions + any session holding ungrouped
         // segments (crash-convergence: a regroup missed by an earlier pass is
         // always found again).
@@ -256,11 +317,12 @@ public actor SessionCoordinator {
         if let ungrouped = try? await store.sessionIDsWithUngroupedSegments() {
             regroupSet.formUnion(ungrouped)
         }
-        for sessionID in regroupSet {
+        for sessionID in regroupSet where !Task.isCancelled {
             do {
                 let enqueued = try await regroup(sessionID: sessionID)
                 summary.regroupedSessions += 1
                 summary.enqueuedIntelligence += enqueued
+                notifyAnalysisDidChange()
             } catch {
                 await emit(.error, "integration.regroup_error", [
                     "session_id": sessionID.uuidString, "error": errorClass(error),
@@ -269,7 +331,8 @@ public actor SessionCoordinator {
         }
 
         // Phase 3 — intelligence drain (includes jobs enqueued in phase 2).
-        while summary.intelligenceJobs < maxJobsPerKind {
+        let textReady = await intelligence.readiness() == .ready
+        while textReady, summary.intelligenceJobs < maxJobsPerKind, !Task.isCancelled {
             let job: AnalysisJob?
             do {
                 job = try await runner.runNextQueuedJob(kind: .intelligence)
@@ -279,6 +342,7 @@ public actor SessionCoordinator {
             }
             guard job != nil else { break }
             summary.intelligenceJobs += 1
+            notifyAnalysisDidChange()
         }
 
         // Pass end (R1-4): release the text engine's residency too — a
@@ -293,6 +357,41 @@ public actor SessionCoordinator {
             "enqueued_intelligence": "\(summary.enqueuedIntelligence)",
         ])
         return summary
+    }
+
+    /// Manual user-triggered pass ("Process now"): reconciles any stored clips
+    /// missing jobs, requeues failed jobs without spawning a competing drain
+    /// task, then runs a serialized drain and notifies listeners.
+    public func runManualProcessing(maxJobsPerKind: Int = 24) async -> DrainSummary {
+        await reconcilePendingTranscriptions()
+        _ = await requeueFailedJobs(kind: .transcription, triggerDrain: false)
+        _ = await requeueFailedJobs(kind: .intelligence, triggerDrain: false)
+        let summary = await processAnalysisQueue(maxJobsPerKind: maxJobsPerKind)
+        notifyAnalysisDidChange()
+        return summary
+    }
+
+    private func acquireDrainSlot() async {
+        if !drainInFlight {
+            drainInFlight = true
+            return
+        }
+        await withCheckedContinuation { drainWaiters.append($0) }
+    }
+
+    private func releaseDrainSlot() {
+        if !drainWaiters.isEmpty {
+            let next = drainWaiters.removeFirst()
+            next.resume()
+        } else {
+            drainInFlight = false
+        }
+    }
+
+    private nonisolated func notifyAnalysisDidChange() {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: RecorderLiveNotifications.analysisDidChange, object: nil)
+        }
     }
 
     /// Re-derives groups for one session from ALL live segments (across
@@ -368,7 +467,7 @@ public actor SessionCoordinator {
     /// Requeues `.failed` jobs of a kind — call after a model install makes
     /// the previously-failing input runnable. Bounded to explicit calls so a
     /// permanently-broken chunk can't spin; attempt history is preserved.
-    public func requeueFailedJobs(kind: AnalysisJobKind) async -> Int {
+    public func requeueFailedJobs(kind: AnalysisJobKind, triggerDrain: Bool = true) async -> Int {
         guard let failed = try? await store.analysisJobs(state: .failed) else { return 0 }
         var requeued = 0
         for job in failed where job.kind == kind {
@@ -380,7 +479,7 @@ public actor SessionCoordinator {
                 requeued += 1
             } catch { break }
         }
-        if requeued > 0 { scheduleDrain() }
+        if triggerDrain && requeued > 0 { scheduleDrain() }
         return requeued
     }
 
@@ -391,6 +490,10 @@ public actor SessionCoordinator {
         }
         drainScheduled = true
         Task {
+            guard await self.canDrainNow() else {
+                self.finishDeferredDrain()
+                return
+            }
             // Bounded passes self-continue while durable work remains
             // (R1-7): a mid-pass enqueue (kick → drainAgain) or a pass that
             // hit its per-kind cap must not strand queued jobs until the
@@ -406,6 +509,12 @@ public actor SessionCoordinator {
             }
             drainScheduled = false
         }
+    }
+
+    private func finishDeferredDrain() {
+        drainScheduled = false
+        drainAgain = false
+        onDeferredWork()
     }
 
     // MARK: - Deletion + lifecycle
@@ -438,11 +547,21 @@ public actor SessionCoordinator {
     public func installTextModel() async throws {
         try await intelligence.installModel()
     }
+    public func cancelModelInstalls() async {
+        await transcriber.cancelInstall()
+        await intelligence.cancelInstall()
+    }
     public func speechInstallSnapshots() async -> AsyncStream<ModelInstallSnapshot> {
         await transcriber.installSnapshots()
     }
     public func textInstallSnapshots() async -> AsyncStream<ModelInstallSnapshot> {
         await intelligence.installSnapshots()
+    }
+    public func speechInstallSnapshot() async -> ModelInstallSnapshot {
+        await transcriber.installSnapshot()
+    }
+    public func textInstallSnapshot() async -> ModelInstallSnapshot {
+        await intelligence.installSnapshot()
     }
 
     // MARK: - Status/read seam for the app shell
@@ -459,12 +578,14 @@ public actor SessionCoordinator {
 
     /// The store through the promoted protocol — the app's read/write seam
     /// for sessions, groups, effective metadata, overrides, search,
-    /// retention, jobs, and diagnostics.
-    public func archiveStore() -> any ExtendedArchiveStoreProtocol {
+    /// retention, jobs, and diagnostics. Nonisolated because `store` is a
+    /// thread-safe actor constant; callers never block on coordinator work
+    /// just to look up audio files or read the archive.
+    public nonisolated func archiveStore() -> any ExtendedArchiveStoreProtocol {
         store
     }
 
-    public func receivedChunks(sessionID: UUID) async -> [AudioChunkMetadata] {
+    public nonisolated func receivedChunks(sessionID: UUID) async -> [AudioChunkMetadata] {
         await receiveService.receivedChunks(sessionID: sessionID)
     }
 

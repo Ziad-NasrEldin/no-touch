@@ -177,21 +177,23 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
                     """
                     INSERT INTO segments (id, chunk_id, session_id, start_time, end_time,
                                           wall_start_time, text, normalized_text,
-                                          language_spans_json, confidence)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                          language_spans_json, confidence, speaker_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         chunk_id=excluded.chunk_id, session_id=excluded.session_id,
                         start_time=excluded.start_time, end_time=excluded.end_time,
                         wall_start_time=excluded.wall_start_time, text=excluded.text,
                         normalized_text=excluded.normalized_text,
                         language_spans_json=excluded.language_spans_json,
-                        confidence=excluded.confidence
+                        confidence=excluded.confidence,
+                        speaker_id=excluded.speaker_id
                     """,
                     [.uuid(segment.id), .uuid(segment.chunkID), .uuid(segment.sessionID),
                      .real(segment.startTime), .real(segment.endTime),
                      .date(segment.wallStartTime), .text(segment.text), .text(normalized),
                      .text(try Self.encode(segment.languageSpans)),
-                     segment.confidence.map { .real($0) } ?? .null]
+                     segment.confidence.map { .real($0) } ?? .null,
+                     segment.speakerID.map { .int(Int64($0)) } ?? .null]
                 )
                 try reindex(segment: segment)
             }
@@ -345,7 +347,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
         return try database.query(
             """
             SELECT s.id, s.chunk_id, s.session_id, s.start_time, s.end_time,
-                   s.wall_start_time, s.text, s.language_spans_json, s.confidence
+                   s.wall_start_time, s.text, s.language_spans_json, s.confidence, s.speaker_id
             FROM group_membership m JOIN segments s ON s.id = m.segment_id
             WHERE m.conversation_id = ?
             ORDER BY m.position
@@ -659,7 +661,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
 
         let sql = """
             SELECT s.id, s.chunk_id, s.session_id, s.start_time, s.end_time,
-                   s.wall_start_time, s.text, s.language_spans_json, s.confidence,
+                   s.wall_start_time, s.text, s.language_spans_json, s.confidence, s.speaker_id,
                    m.conversation_id
             FROM segments s
             LEFT JOIN group_membership m ON m.segment_id = s.id
@@ -672,7 +674,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
         let rows = try database.query(sql, params) { statement in
             (
                 segment: Self.mapSegment(statement),
-                conversationID: ArchiveDatabase.optionalUUID(statement, 9)
+                conversationID: ArchiveDatabase.optionalUUID(statement, 10)
             )
         }
         var hits: [TranscriptSearchHit] = []
@@ -1110,7 +1112,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
         return try database.query(
             """
             SELECT s.id, s.chunk_id, s.session_id, s.start_time, s.end_time,
-                   s.wall_start_time, s.text, s.language_spans_json, s.confidence
+                   s.wall_start_time, s.text, s.language_spans_json, s.confidence, s.speaker_id
             FROM segments s JOIN chunks c ON c.id = s.chunk_id
             WHERE s.session_id = ?
               AND NOT EXISTS (SELECT 1 FROM deletion_intents d
@@ -1259,7 +1261,9 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
             languageSpans: (try? decode([LanguageSpan].self,
                                         from: ArchiveDatabase.text(statement, 7))) ?? [],
             confidence: sqlite3_column_type(statement, 8) == SQLITE_NULL
-                ? nil : sqlite3_column_double(statement, 8)
+                ? nil : sqlite3_column_double(statement, 8),
+            speakerID: sqlite3_column_type(statement, 9) == SQLITE_NULL
+                ? nil : Int(sqlite3_column_int64(statement, 9))
         )
     }
 

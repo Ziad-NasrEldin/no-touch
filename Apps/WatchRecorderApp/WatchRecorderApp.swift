@@ -79,11 +79,14 @@ final class RecorderModel: ObservableObject {
     func stop() { run { try await self.capture.stopSession() } }
 
     private func run(_ action: @escaping () async throws -> RecordingSession) {
+        guard !busy else { return }
         busy = true
         errorMessage = nil
         Task {
             do {
-                _ = try await action()
+                let updated = try await action()
+                session = updated
+                await refreshCounts()
             } catch {
                 errorMessage = String(describing: error)
                 diagnostics.emit(.lifecycle, name: "control-failed", severity: .error,
@@ -123,10 +126,13 @@ final class SessionSyncRelay {
               WCSession.default.activationState == .activated,
               let data = try? encoder.encode(session)
         else { return }
-        try? WCSession.default.updateApplicationContext([
-            "type": "session",
-            "session": data,
-        ])
+        let payload: [String: Any] = ["type": "session", "session": data]
+        try? WCSession.default.updateApplicationContext(payload)
+        // Reachable → also message the phone so it wakes and updates its
+        // Live Activity right away (applicationContext can lag).
+        if WCSession.default.isReachable {
+            WCSession.default.sendMessage(payload, replyHandler: nil, errorHandler: nil)
+        }
     }
 }
 #endif

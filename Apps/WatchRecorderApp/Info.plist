@@ -17,20 +17,16 @@
 	<key>CFBundleShortVersionString</key>
 	<string>0.1</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
-	<key>WKApplication</key>
-	<true/>
-	<key>WKCompanionAppBundleIdentifier</key>
-	<string>com.placeholder.PhoneRecorder</string>
+	<string>7</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Records audio throughout the day so your conversations can be organized on your iPhone.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
 	</array>
-	<key>WKBackgroundModes</key>
-	<array>
-		<string>audio</string>
-	</array>
+	<key>WKApplication</key>
+	<true/>
+	<key>WKCompanionAppBundleIdentifier</key>
+	<string>com.ziadahmed.WatchRecorder</string>
 </dict>
 </plist>

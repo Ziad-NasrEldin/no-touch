@@ -32,7 +32,7 @@ final class ArchiveDatabase {
     private(set) var schemaVersion = 0
 
     /// Bump whenever the schema changes; migrations run in order, additively.
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 2
 
     init(fileURL: URL) {
         self.fileURL = fileURL
@@ -204,6 +204,11 @@ final class ArchiveDatabase {
                     try execute(statement)
                 }
             }
+            if version < 2 {
+                for statement in ArchiveSchema.version2 {
+                    try execute(statement)
+                }
+            }
             try execute("PRAGMA user_version = \(ArchiveDatabase.currentSchemaVersion)")
         }
         schemaVersion = ArchiveDatabase.currentSchemaVersion
@@ -211,6 +216,11 @@ final class ArchiveDatabase {
 }
 
 enum ArchiveSchema {
+    /// v2: per-segment diarized speaker label.
+    static let version2: [String] = [
+        "ALTER TABLE segments ADD COLUMN speaker_id INTEGER",
+    ]
+
     static let version1: [String] = [
         // Recording sessions — phone-side mirror of capture truth.
         """

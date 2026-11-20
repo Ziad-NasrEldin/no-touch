@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Scheme
    LastUpgradeVersion = "2720"
-   version = "2.0">
+   version = "1.7">
    <BuildAction
       parallelizeBuildables = "YES"
       buildImplicitDependencies = "YES"
@@ -23,6 +23,13 @@
          </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
+   <TestAction
+      buildConfiguration = "Debug"
+      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
+      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
+      shouldUseLaunchSchemeArgsEnv = "YES"
+      shouldAutocreateTestPlan = "YES">
+   </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
@@ -39,7 +46,6 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "F0F0F0F0F0F0F0F0F0F0F011"
             BuildableName = "WatchRecorderApp.app"
-            BlueprintName = "WatchRecorderApp"
             ReferencedContainer = "container:WatchRecorder.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -56,7 +62,6 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "F0F0F0F0F0F0F0F0F0F0F011"
             BuildableName = "WatchRecorderApp.app"
-            BlueprintName = "WatchRecorderApp"
             ReferencedContainer = "container:WatchRecorder.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>

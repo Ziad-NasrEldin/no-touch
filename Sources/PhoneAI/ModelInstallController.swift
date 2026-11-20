@@ -109,6 +109,9 @@ public actor ModelInstallController {
     private var continuations: [UUID: AsyncStream<ModelInstallSnapshot>.Continuation] = [:]
     private var installTask: Task<Void, Error>?
     private let downloaderOverride: (any ModelContentDownloader)?
+    private var lastProgressEmitAt: Date = .distantPast
+    private var lastProgressEmitValue: Double = -1
+    private var lastProgressPersistAt: Date = .distantPast
 
     private static let recordFileName = "install-record.json"
 
@@ -131,6 +134,7 @@ public actor ModelInstallController {
         if let data = try? Data(contentsOf: recordURL),
            var record = try? JSONDecoder().decode(ModelInstallSnapshot.self, from: data)
         {
+            var needsPersist = false
             // A persisted in-flight state means the process died mid-install:
             // the download didn't finish, so present an honest resumable
             // failure rather than a stalled "downloading".
@@ -138,8 +142,37 @@ public actor ModelInstallController {
                 record.state = .failed
                 record.failureReason = "install interrupted before verification — start install again to resume"
                 record.updatedAt = Date()
+                needsPersist = true
+            } else if record.state == .ready {
+                // Rebase absolute install paths across iOS app-container UUID
+                // rotations (e.g. TestFlight / Xcode reinstalls), and refuse to
+                // claim `.ready` if the verified model directory is gone.
+                if let resolved = Self.resolveStoredInstallDirectory(
+                    record.installDirectory,
+                    descriptorID: descriptor.id,
+                    modelDirectory: modelDir,
+                    fileManager: fm
+                ) {
+                    let stored = Self.storableInstallPath(for: resolved, under: modelDir)
+                    if record.installDirectory != stored {
+                        record.installDirectory = stored
+                        record.updatedAt = Date()
+                        needsPersist = true
+                    }
+                } else {
+                    record.state = .notInstalled
+                    record.progress = 0
+                    record.downloadedBytes = 0
+                    record.installDirectory = nil
+                    record.failureReason = "Model files were missing on disk — tap Install models to download again."
+                    record.updatedAt = Date()
+                    needsPersist = true
+                }
             }
             snapshotValue = record
+            if needsPersist, let encoded = try? JSONEncoder().encode(record) {
+                try? encoded.write(to: recordURL, options: .atomic)
+            }
         } else {
             snapshotValue = ModelInstallSnapshot(
                 descriptorID: descriptor.id,
@@ -153,6 +186,82 @@ public actor ModelInstallController {
     /// Directory the descriptor's bytes live under.
     public nonisolated var modelDirectory: URL {
         rootDirectory.appendingPathComponent(descriptor.id, isDirectory: true)
+    }
+
+    /// Resolves the live on-disk install directory for a `.ready` snapshot,
+    /// transparently rebasing legacy absolute paths across iOS sandbox container
+    /// UUID changes. Returns nil if the model is not ready or missing on disk.
+    public func resolvedInstallDirectory() -> URL? {
+        guard snapshotValue.state == .ready else { return nil }
+        guard let resolved = Self.resolveStoredInstallDirectory(
+            snapshotValue.installDirectory,
+            descriptorID: descriptor.id,
+            modelDirectory: modelDirectory,
+            fileManager: .default
+        ) else {
+            update {
+                $0.state = .notInstalled
+                $0.progress = 0
+                $0.downloadedBytes = 0
+                $0.installDirectory = nil
+                $0.failureReason = "Model files were missing on disk — tap Install models to download again."
+            }
+            return nil
+        }
+        return resolved
+    }
+
+    private static func storableInstallPath(for resolved: URL, under modelDir: URL) -> String {
+        let basePath = modelDir.standardizedFileURL.path
+        let targetPath = resolved.standardizedFileURL.path
+        if targetPath == basePath { return "." }
+        let prefix = basePath.hasSuffix("/") ? basePath : basePath + "/"
+        if targetPath.hasPrefix(prefix) {
+            return String(targetPath.dropFirst(prefix.count))
+        }
+        return targetPath
+    }
+
+    private static func resolveStoredInstallDirectory(
+        _ storedPath: String?,
+        descriptorID: String,
+        modelDirectory: URL,
+        fileManager: FileManager
+    ) -> URL? {
+        guard let storedPath, !storedPath.isEmpty else { return nil }
+        var isDir: ObjCBool = false
+
+        // 1. Relative path under modelDirectory (new format).
+        if !storedPath.hasPrefix("/") {
+            let candidate = storedPath == "."
+                ? modelDirectory
+                : modelDirectory.appendingPathComponent(storedPath, isDirectory: true)
+            if fileManager.fileExists(atPath: candidate.path, isDirectory: &isDir), isDir.boolValue {
+                return candidate
+            }
+        }
+
+        // 2. Existing absolute path (same container / macOS).
+        if storedPath.hasPrefix("/"),
+           fileManager.fileExists(atPath: storedPath, isDirectory: &isDir),
+           isDir.boolValue
+        {
+            return URL(fileURLWithPath: storedPath, isDirectory: true)
+        }
+
+        // 3. Legacy absolute path from a previous iOS container UUID:
+        // extract the suffix after `/<descriptorID>/` and rebase onto `modelDirectory`.
+        let marker = "/\(descriptorID)/"
+        if let range = storedPath.range(of: marker, options: .backwards) {
+            let suffix = String(storedPath[range.upperBound...])
+            if !suffix.isEmpty {
+                let rebased = modelDirectory.appendingPathComponent(suffix, isDirectory: true)
+                if fileManager.fileExists(atPath: rebased.path, isDirectory: &isDir), isDir.boolValue {
+                    return rebased
+                }
+            }
+        }
+        return nil
     }
 
     public func snapshot() -> ModelInstallSnapshot { snapshotValue }
@@ -195,6 +304,9 @@ public actor ModelInstallController {
             )
         }
 
+        lastProgressEmitAt = .distantPast
+        lastProgressEmitValue = -1
+        lastProgressPersistAt = .distantPast
         update { $0.state = .downloading; $0.failureReason = nil }
 
         // The transfer runs in its own task so `cancelInstall()` can abort it
@@ -257,24 +369,47 @@ public actor ModelInstallController {
     private func recordProgress(downloaded: Int64, expected: Int64?) {
         guard snapshotValue.state == .downloading else { return }
         let total = expected ?? descriptor.expectedBytes
-        update {
-            $0.downloadedBytes = max($0.downloadedBytes, downloaded)
-            $0.expectedBytes = total
-            if let total, total > 0 {
-                $0.progress = max($0.progress, min(0.999, Double($0.downloadedBytes) / Double(total)))
-            }
+        let nextDownloaded = max(snapshotValue.downloadedBytes, downloaded)
+        var nextProgress = snapshotValue.progress
+        if let total, total > 0 {
+            nextProgress = max(nextProgress, min(0.999, Double(nextDownloaded) / Double(total)))
+        }
+
+        let now = Date()
+        let deltaProgress = nextProgress - lastProgressEmitValue
+        let sinceEmit = now.timeIntervalSince(lastProgressEmitAt)
+        let shouldEmit = lastProgressEmitValue < 0 || deltaProgress >= 0.005 || sinceEmit >= 0.15
+        let shouldPersist = now.timeIntervalSince(lastProgressPersistAt) >= 1.0
+
+        snapshotValue.downloadedBytes = nextDownloaded
+        snapshotValue.expectedBytes = total
+        snapshotValue.progress = nextProgress
+        snapshotValue.updatedAt = now
+
+        if shouldPersist {
+            lastProgressPersistAt = now
+            persist()
+        }
+        if shouldEmit {
+            lastProgressEmitAt = now
+            lastProgressEmitValue = nextProgress
+            emit()
         }
     }
 
     private func enterVerifying() {
+        lastProgressEmitAt = .distantPast
+        lastProgressEmitValue = -1
+        lastProgressPersistAt = .distantPast
         update { $0.state = .verifying; $0.progress = max($0.progress, 0.99) }
     }
 
     private func enterReady(installDirectory: URL) {
+        let storable = Self.storableInstallPath(for: installDirectory, under: modelDirectory)
         update {
             $0.state = .ready
             $0.progress = 1
-            $0.installDirectory = installDirectory.path
+            $0.installDirectory = storable
             $0.failureReason = nil
         }
     }

@@ -1,11 +1,13 @@
 import SwiftUI
+import UIKit
 import RecorderContracts
+import PhoneAI
 import PhoneIntegration
+import PhoneStorage
 
-/// Real app-shell model (I1): owns the integration coordinator, the
-/// BGProcessingTask registration, model-install progress, and live counts
-/// read from the archive through `ExtendedArchiveStoreProtocol`.
-/// U1 owns the real product UI; this shell exercises the real pipeline.
+/// App-shell model: owns the integration coordinator, BGProcessingTask
+/// registration, model-install progress, manual processing feedback, and live
+/// counts read from the archive through `ExtendedArchiveStoreProtocol`.
 @MainActor
 final class PhoneRecorderModel: ObservableObject {
     let coordinator: SessionCoordinator?
@@ -17,33 +19,94 @@ final class PhoneRecorderModel: ObservableObject {
     @Published var textReadiness: ModelReadinessState = .notInstalled
     @Published var speechProgress: Double = 0
     @Published var textProgress: Double = 0
+    @Published var speechDownloadedBytes: Int64 = 0
+    @Published var speechExpectedBytes: Int64?
+    @Published var textDownloadedBytes: Int64 = 0
+    @Published var textExpectedBytes: Int64?
+    @Published var speechFailureReason: String?
+    @Published var textFailureReason: String?
+
     @Published var queuedJobs = 0
     @Published var failedJobs = 0
     @Published var sessionCount = 0
+    @Published var chunkCount = 0
     @Published var groupCount = 0
     @Published var engineLabel = ""
+
+    @Published var isInstalling = false
+    @Published var installStage: String?
+    @Published var isProcessing = false
+    @Published var statusMessage: String?
     @Published var lastError: String?
+    @Published var recentJobError: String?
     @Published var lastDrain = ""
+
+    let live: LiveRecordingStatus
+    private nonisolated(unsafe) var notificationObservers: [NSObjectProtocol] = []
+
+    var allModelsReady: Bool {
+        speechReadiness == .ready && textReadiness == .ready
+    }
 
     init() {
         if let coordinator = try? SessionCoordinator.makeDefault() {
             self.coordinator = coordinator
+            live = LiveRecordingStatus(coordinator: coordinator)
             #if os(iOS)
-            bgScheduler = BackgroundAnalysisScheduler(coordinator: coordinator)
-            bgScheduler?.register()
+            let scheduler = BackgroundAnalysisScheduler(coordinator: coordinator)
+            scheduler.register()
+            bgScheduler = scheduler
+            // Run inference only while the app is in the foreground; when a
+            // watch clip wakes the app in the background, hand the work to a
+            // BGProcessingTask instead (the OS runs it when it can).
+            Task {
+                await coordinator.setDrainPolicy(
+                    // Foreground, or kept awake while the watch records.
+                    canDrainNow: {
+                        await MainActor.run {
+                            UIApplication.shared.applicationState != .background || BackgroundKeepAlive.isRunning
+                        }
+                    },
+                    onDeferredWork: { scheduler.schedule() },
+                    // Text model needs the GPU → foreground only.
+                    allowsTextModel: {
+                        await MainActor.run { UIApplication.shared.applicationState != .background }
+                    }
+                )
+            }
             #endif
             engineLabel = "speech=\(coordinator.speechEngineIdentifier) text=\(coordinator.textEngineIdentifier)"
         } else {
             coordinator = nil
+            live = LiveRecordingStatus(coordinator: nil)
             #if os(iOS)
             bgScheduler = nil
             #endif
-            lastError = "coordinator bootstrap failed (models root unavailable)"
+            lastError = "Coordinator bootstrap failed (models root unavailable)."
         }
+
+        let center = NotificationCenter.default
+        notificationObservers.append(center.addObserver(
+            forName: RecorderLiveNotifications.analysisDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in await self?.refresh() }
+        })
+        notificationObservers.append(center.addObserver(
+            forName: RecorderLiveNotifications.chunkDidArrive, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in await self?.refresh() }
+        })
+
         Task { await observeInstalls() }
         Task { [weak self] in
             await self?.coordinator?.activate()
             await self?.refresh()
+        }
+    }
+
+    deinit {
+        for observer in notificationObservers {
+            NotificationCenter.default.removeObserver(observer)
         }
     }
 
@@ -53,66 +116,195 @@ final class PhoneRecorderModel: ObservableObject {
             group.addTask { [weak self] in
                 for await snapshot in await coordinator.speechInstallSnapshots() {
                     await MainActor.run {
-                        self?.speechReadiness = snapshot.state
-                        self?.speechProgress = snapshot.progress
+                        self?.applySpeechSnapshot(snapshot)
                     }
                 }
             }
             group.addTask { [weak self] in
                 for await snapshot in await coordinator.textInstallSnapshots() {
                     await MainActor.run {
-                        self?.textReadiness = snapshot.state
-                        self?.textProgress = snapshot.progress
+                        self?.applyTextSnapshot(snapshot)
                     }
                 }
             }
         }
     }
 
-    func refresh() async {
-        guard let coordinator, let store = await storeOf(coordinator) else { return }
-        speechReadiness = await coordinator.transcriptionReadiness()
-        textReadiness = await coordinator.intelligenceReadiness()
-        queuedJobs = (try? await store.analysisJobs(state: .queued).count) ?? 0
-        failedJobs = (try? await store.analysisJobs(state: .failed).count) ?? 0
-        let sessions = (try? await store.sessions()) ?? []
-        sessionCount = sessions.count
-        var groups = 0
-        for session in sessions {
-            groups += ((try? await store.conversationGroups(sessionID: session.id)) ?? []).count
-        }
-        groupCount = groups
+    private func applySpeechSnapshot(_ snapshot: ModelInstallSnapshot) {
+        speechReadiness = snapshot.state
+        speechProgress = snapshot.progress
+        speechDownloadedBytes = snapshot.downloadedBytes
+        speechExpectedBytes = snapshot.expectedBytes
+        speechFailureReason = snapshot.failureReason
     }
 
-    private func storeOf(_ coordinator: SessionCoordinator) async -> (any ExtendedArchiveStoreProtocol)? {
-        await coordinator.archiveStore()
+    private func applyTextSnapshot(_ snapshot: ModelInstallSnapshot) {
+        textReadiness = snapshot.state
+        textProgress = snapshot.progress
+        textDownloadedBytes = snapshot.downloadedBytes
+        textExpectedBytes = snapshot.expectedBytes
+        textFailureReason = snapshot.failureReason
+    }
+
+    func refresh() async {
+        guard let coordinator else { return }
+        let store = coordinator.archiveStore()
+        applySpeechSnapshot(await coordinator.speechInstallSnapshot())
+        applyTextSnapshot(await coordinator.textInstallSnapshot())
+        speechReadiness = await coordinator.transcriptionReadiness()
+        textReadiness = await coordinator.intelligenceReadiness()
+
+        let queued = (try? await store.analysisJobs(state: .queued)) ?? []
+        let failed = (try? await store.analysisJobs(state: .failed)) ?? []
+        queuedJobs = queued.count
+        failedJobs = failed.count
+        recentJobError = failed.sorted { $0.updatedAt > $1.updatedAt }.first?.lastError
+
+        let sessions = (try? await store.sessions()) ?? []
+        var allSessionIDs = Set(sessions.map(\.id))
+        if let chunkSessions = try? await store.sessionIDsWithStoredChunks() {
+            allSessionIDs.formUnion(chunkSessions)
+        }
+        sessionCount = allSessionIDs.count
+
+        var chunksTotal = 0
+        var groupsTotal = 0
+        for sessionID in allSessionIDs {
+            chunksTotal += await coordinator.receivedChunks(sessionID: sessionID).count
+            groupsTotal += ((try? await store.conversationGroups(sessionID: sessionID)) ?? []).count
+        }
+        chunkCount = chunksTotal
+        groupCount = groupsTotal
     }
 
     func installModels() {
+        guard !isInstalling else { return }
+        guard let coordinator else {
+            lastError = "Pipeline coordinator is unavailable."
+            return
+        }
+        lastError = nil
+
+        if allModelsReady {
+            statusMessage = "Both models are already installed and ready."
+            Task { await refresh() }
+            return
+        }
+
+        isInstalling = true
+        installStage = "Preparing model download…"
+        statusMessage = "Starting model installation…"
+
         Task { [weak self] in
-            guard let coordinator = self?.coordinator else { return }
+            guard let self else { return }
+            defer {
+                self.isInstalling = false
+                self.installStage = nil
+            }
             do {
                 if await coordinator.transcriptionReadiness() != .ready {
+                    self.installStage = "Downloading speech model (1/2)…"
                     try await coordinator.installSpeechModel()
                 }
                 if await coordinator.intelligenceReadiness() != .ready {
+                    self.installStage = "Downloading text model (2/2)…"
                     try await coordinator.installTextModel()
                 }
                 // Jobs that failed pre-install (modelNotReady) become runnable.
-                let retriedTranscription = await coordinator.requeueFailedJobs(kind: .transcription)
-                let retriedIntelligence = await coordinator.requeueFailedJobs(kind: .intelligence)
-                if retriedTranscription + retriedIntelligence > 0 { coordinator.kickProcessing() }
+                let retriedTranscription = await coordinator.requeueFailedJobs(kind: .transcription, triggerDrain: false)
+                let retriedIntelligence = await coordinator.requeueFailedJobs(kind: .intelligence, triggerDrain: false)
+                await self.refresh()
+                if retriedTranscription + retriedIntelligence > 0 || self.queuedJobs > 0 {
+                    self.statusMessage = "Models installed. Processing queued recordings…"
+                    coordinator.kickProcessing()
+                } else {
+                    self.statusMessage = "Both models installed and verified."
+                }
+            } catch is CancellationError {
+                self.statusMessage = "Model installation cancelled. Partial files kept to resume."
             } catch {
-                self?.lastError = "install failed: \(error)"
+                self.lastError = "Install failed: \(error.localizedDescription)"
+                self.statusMessage = nil
             }
-            await self?.refresh()
+            await self.refresh()
         }
     }
 
+    func cancelInstall() {
+        guard isInstalling, let coordinator else { return }
+        statusMessage = "Cancelling download…"
+        Task { await coordinator.cancelModelInstalls() }
+    }
+
     func processNow() {
+        guard !isProcessing else { return }
+        guard let coordinator else {
+            lastError = "Pipeline coordinator is unavailable."
+            return
+        }
+
+        isProcessing = true
+        lastError = nil
+        recentJobError = nil
+        statusMessage = "Checking recordings and queue…"
+
         Task { [weak self] in
-            _ = await self?.coordinator?.processAnalysisQueue()
-            await self?.refresh()
+            guard let self else { return }
+            defer { self.isProcessing = false }
+
+            await coordinator.reconcilePendingTranscriptions()
+            await self.refresh()
+
+            let speech = await coordinator.transcriptionReadiness()
+            let text = await coordinator.intelligenceReadiness()
+
+            if speech != .ready {
+                if self.chunkCount == 0 && self.queuedJobs == 0 && self.failedJobs == 0 {
+                    self.statusMessage = "No recordings in archive yet. Install models on Wi-Fi when ready."
+                } else {
+                    self.statusMessage = "Speech model is \(Self.readinessLabel(speech)). Tap Install models first."
+                }
+                self.lastDrain = self.statusMessage ?? ""
+                return
+            }
+
+            self.statusMessage = "Processing recordings…"
+            let summary = await coordinator.runManualProcessing()
+            await self.refresh()
+
+            let message: String
+            let totalWork = summary.transcriptionJobs + summary.regroupedSessions + summary.intelligenceJobs
+            if totalWork > 0 {
+                var parts: [String] = []
+                if summary.transcriptionJobs > 0 {
+                    parts.append("\(summary.transcriptionJobs) clip\(summary.transcriptionJobs == 1 ? "" : "s") transcribed")
+                }
+                if summary.regroupedSessions > 0 {
+                    parts.append("\(summary.regroupedSessions) session\(summary.regroupedSessions == 1 ? "" : "s") grouped")
+                }
+                if summary.intelligenceJobs > 0 {
+                    parts.append("\(summary.intelligenceJobs) summary\(summary.intelligenceJobs == 1 ? "" : " jobs") updated")
+                }
+                var combined = "Done: " + parts.joined(separator: ", ") + "."
+                if text != .ready {
+                    combined += " Install the text model for titles & summaries."
+                }
+                if self.failedJobs > 0 {
+                    combined += " \(self.failedJobs) job\(self.failedJobs == 1 ? "" : "s") failed."
+                }
+                message = combined
+            } else if self.failedJobs > 0 {
+                message = "0 processed — \(self.failedJobs) job\(self.failedJobs == 1 ? "" : "s") failed. See error below."
+            } else if self.chunkCount == 0 {
+                message = "No recordings in archive to process yet."
+            } else if text != .ready {
+                message = "All clips are transcribed. Install the text model for titles & summaries."
+            } else {
+                message = "Everything is up to date — no pending clips to process."
+            }
+
+            self.statusMessage = message
+            self.lastDrain = message
         }
     }
 
@@ -121,6 +313,7 @@ final class PhoneRecorderModel: ObservableObject {
         case .active:
             Task { [weak self] in
                 await self?.coordinator?.activate()
+                await self?.live.reloadFromArchive()
                 await self?.refresh()
             }
         case .background:
@@ -132,6 +325,16 @@ final class PhoneRecorderModel: ObservableObject {
             break
         }
     }
+
+    static func readinessLabel(_ state: ModelReadinessState) -> String {
+        switch state {
+        case .notInstalled: return "Not installed"
+        case .downloading: return "Downloading…"
+        case .verifying: return "Verifying…"
+        case .ready: return "Ready"
+        case .failed: return "Failed"
+        }
+    }
 }
 
 @main
@@ -141,7 +344,12 @@ struct PhoneRecorderApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(model: model)
+            TabView {
+                RecordingsView(model: model)
+                    .tabItem { Label("Recordings", systemImage: "waveform") }
+                NavigationStack { ContentView(model: model) }
+                    .tabItem { Label("Status", systemImage: "gearshape") }
+            }
         }
         .onChange(of: scenePhase) { _, phase in
             model.scenePhaseChanged(phase)

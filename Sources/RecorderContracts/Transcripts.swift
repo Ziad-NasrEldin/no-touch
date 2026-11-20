@@ -36,6 +36,9 @@ public struct TranscriptSegment: Codable, Sendable, Equatable, Identifiable {
     public var text: String
     public var languageSpans: [LanguageSpan]
     public var confidence: Double?
+    /// Diarized speaker label within the source chunk (0-based), nil when
+    /// diarization did not run or could not attribute the segment.
+    public var speakerID: Int?
 
     public init(
         id: UUID = UUID(),
@@ -46,7 +49,8 @@ public struct TranscriptSegment: Codable, Sendable, Equatable, Identifiable {
         wallStartTime: Date? = nil,
         text: String,
         languageSpans: [LanguageSpan] = [],
-        confidence: Double? = nil
+        confidence: Double? = nil,
+        speakerID: Int? = nil
     ) {
         self.id = id
         self.chunkID = chunkID
@@ -57,6 +61,7 @@ public struct TranscriptSegment: Codable, Sendable, Equatable, Identifiable {
         self.text = text
         self.languageSpans = languageSpans
         self.confidence = confidence
+        self.speakerID = speakerID
     }
 }
 

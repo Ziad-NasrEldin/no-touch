@@ -3,6 +3,9 @@ import RecorderContracts
 
 #if canImport(WhisperKit)
 import WhisperKit
+#if canImport(SpeakerKit)
+import SpeakerKit
+#endif
 
 /// Real speech engine backed by Argmax WhisperKit (CoreML Whisper builds).
 ///
@@ -20,6 +23,10 @@ public actor WhisperKitSpeechEngine: SpeechTranscriptionEngine {
     private let variant: String
     private let descriptorID: String
     private var pipe: WhisperKit?
+    private var speakerModelsBase: URL?
+    #if canImport(SpeakerKit)
+    private var speakerKit: SpeakerKit?
+    #endif
 
     public init(descriptor: ModelDescriptor) {
         guard case .whisperKitRepository(let variant, _) = descriptor.installMethod else {
@@ -40,12 +47,22 @@ public actor WhisperKitSpeechEngine: SpeechTranscriptionEngine {
         let config = WhisperKitConfig(
             model: variant,
             modelFolder: directory.path,
+            // Neural Engine + CPU only: iOS forbids GPU work from background
+            // apps, and the ANE is both fast and allowed while backgrounded,
+            // so clips transcribe live as they arrive from the watch.
+            computeOptions: ModelComputeOptions(
+                melCompute: .cpuAndNeuralEngine,
+                audioEncoderCompute: .cpuAndNeuralEngine,
+                textDecoderCompute: .cpuAndNeuralEngine
+            ),
             verbose: false,
             logLevel: .error,
             load: true,
             download: false
         )
         pipe = try await WhisperKit(config)
+        // Speaker models live next to the speech model install.
+        speakerModelsBase = directory.deletingLastPathComponent().appendingPathComponent("speakerkit", isDirectory: true)
     }
 
     public func unload() async {
@@ -53,6 +70,10 @@ public actor WhisperKitSpeechEngine: SpeechTranscriptionEngine {
             await pipe.unloadModels()
         }
         pipe = nil
+        #if canImport(SpeakerKit)
+        if let speakerKit { await speakerKit.unloadModels() }
+        speakerKit = nil
+        #endif
     }
 
     public func transcribe(
@@ -106,7 +127,63 @@ public actor WhisperKitSpeechEngine: SpeechTranscriptionEngine {
         }
         detected = detectedCount.max(by: { $0.value < $1.value })?.key
         engineSegments.sort { $0.start < $1.start }
+        if !engineSegments.isEmpty {
+            await assignSpeakers(to: &engineSegments, samples: samples, mediaTimeOffset: mediaTimeOffset)
+        }
         return EngineTranscriptionResult(detectedLanguage: detected, segments: engineSegments)
+    }
+
+    /// Diarizes the same audio with SpeakerKit (pyannote, on-device) and
+    /// labels each transcript segment with the speaker that overlaps it most.
+    /// Best effort: any failure (e.g. speaker models not downloadable yet)
+    /// leaves segments unlabeled instead of failing the transcription.
+    private func assignSpeakers(
+        to segments: inout [EngineTranscriptSegment],
+        samples: [Float],
+        mediaTimeOffset: TimeInterval
+    ) async {
+        #if canImport(SpeakerKit)
+        do {
+            if speakerKit == nil {
+                if let base = speakerModelsBase {
+                    try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+                }
+                speakerKit = try await SpeakerKit(PyannoteConfig(
+                    downloadBase: speakerModelsBase?.path,
+                    download: true,
+                    load: true,
+                    verbose: false,
+                    logLevel: .error
+                ))
+            }
+            guard let speakerKit else { return }
+            let result = try await speakerKit.diarize(audioArray: samples)
+            let turns: [(id: Int, start: TimeInterval, end: TimeInterval)] = result.segments.compactMap { turn in
+                guard let id = turn.speaker.speakerId else { return nil }
+                return (id, TimeInterval(turn.startTime) + mediaTimeOffset, TimeInterval(turn.endTime) + mediaTimeOffset)
+            }
+            guard !turns.isEmpty else { return }
+            for index in segments.indices {
+                let seg = segments[index]
+                var overlapBySpeaker: [Int: TimeInterval] = [:]
+                for turn in turns {
+                    let overlap = min(seg.end, turn.end) - max(seg.start, turn.start)
+                    if overlap > 0 { overlapBySpeaker[turn.id, default: 0] += overlap }
+                }
+                if let best = overlapBySpeaker.max(by: { $0.value < $1.value })?.key {
+                    segments[index].speakerID = best
+                } else {
+                    // No overlap: take the nearest turn.
+                    let mid = (seg.start + seg.end) / 2
+                    segments[index].speakerID = turns.min(by: {
+                        abs(($0.start + $0.end) / 2 - mid) < abs(($1.start + $1.end) / 2 - mid)
+                    })?.id
+                }
+            }
+        } catch {
+            // Diarization is optional; keep the transcript.
+        }
+        #endif
     }
 
     /// WhisperKit segment text can carry decoder control tokens like

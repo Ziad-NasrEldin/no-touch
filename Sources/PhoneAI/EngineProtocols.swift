@@ -28,6 +28,8 @@ public struct EngineTranscriptSegment: Sendable, Equatable {
     /// Whisper-style no-speech probability for the segment.
     public var noSpeechProbability: Double?
     public var words: [EngineWord]?
+    /// Diarized speaker label (0-based) within this audio, if known.
+    public var speakerID: Int?
 
     public init(
         start: TimeInterval,
@@ -35,9 +37,11 @@ public struct EngineTranscriptSegment: Sendable, Equatable {
         text: String,
         averageLogProbability: Double? = nil,
         noSpeechProbability: Double? = nil,
-        words: [EngineWord]? = nil
+        words: [EngineWord]? = nil,
+        speakerID: Int? = nil
     ) {
         self.start = start
+        self.speakerID = speakerID
         self.end = end
         self.text = text
         self.averageLogProbability = averageLogProbability

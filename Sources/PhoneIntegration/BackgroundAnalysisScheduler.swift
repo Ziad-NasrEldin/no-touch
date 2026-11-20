@@ -23,7 +23,7 @@ import BackgroundTasks
 ///   `activate()`, or another BG window). `SessionCoordinator.cancelProcessing`
 ///   remains for deliberate lifecycle shutdown only.
 public final class BackgroundAnalysisScheduler: @unchecked Sendable {
-    public static let taskIdentifier = "com.placeholder.PhoneRecorder.processing"
+    public static let taskIdentifier = "com.ziadahmed.WatchRecorder.processing"
 
     private let coordinator: SessionCoordinator
 
