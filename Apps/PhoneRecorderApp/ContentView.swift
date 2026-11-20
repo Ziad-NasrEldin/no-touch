@@ -122,7 +122,7 @@ struct ContentView: View {
                 }
             }
         }
-        .navigationTitle("Watch Recorder")
+        .navigationTitle("No Touch")
         .refreshable { await model.refresh() }
         .task { await model.refresh() }
         .onAppear { Task { await model.refresh() } }

@@ -1,10 +1,30 @@
+<div align="center">
+
+<img src="docs/assets/app-icon.png" width="160" alt="No Touch app icon">
+
 # No Touch
 
 **Your day, remembered — without ever reaching for your phone.**
 
+[![iOS](https://img.shields.io/badge/iOS-17%2B-000000?logo=apple&logoColor=white)](https://developer.apple.com/ios/)
+[![watchOS](https://img.shields.io/badge/watchOS-10%2B-000000?logo=apple&logoColor=white)](https://developer.apple.com/watchos/)
+[![Swift](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
+[![On-device AI](https://img.shields.io/badge/AI-100%25%20on--device-DA291C)](docs/spec.md)
+[![License](https://img.shields.io/badge/License-MIT-F2F0EB)](LICENSE)
+
+</div>
+
 No Touch is a native Apple Watch + iPhone recorder built around a single idea: tap once in the morning, and let your Watch quietly capture the conversations that matter. Every recording is transcribed, organized, and summarized **entirely on your own devices** — no cloud, no accounts, no audio ever leaving your hands.
 
 Built for real life in the Gulf: first-class **Saudi/Gulf Arabic**, seamless Arabic–English code-switching, and a daily timeline you can actually search.
+
+<div align="center">
+  <img src="docs/assets/watch.png" width="200" alt="Apple Watch — Start day">
+  &nbsp;&nbsp;
+  <img src="docs/assets/iphone-recordings.png" width="250" alt="iPhone — Recordings timeline">
+  &nbsp;&nbsp;
+  <img src="docs/assets/iphone-status.png" width="250" alt="iPhone — Pipeline status">
+</div>
 
 ---
 
@@ -75,7 +95,7 @@ No Touch/
 │   └── PhoneIntegration/    # Session coordinator, background analysis
 ├── WatchRecorder.xcodeproj  # App targets (watchOS + iOS)
 ├── Package.swift            # SwiftPM libraries
-└── docs/                    # Product spec and reference material
+└── docs/                    # Product spec, assets, reference material
 ```
 
 ## Getting started
@@ -84,19 +104,19 @@ No Touch/
 
 - Xcode 16+ with the iOS 17 and watchOS 10 SDKs
 - An Apple Watch paired to an iPhone (on-device AI features require an Apple-silicon-class iPhone; target hardware is iPhone 14 Pro Max)
-- ~1–3 GB free space for on-device models (downloaded once, verified on install)
+- ~2 GB free space for on-device models (downloaded once, verified on install)
 
 **Build**
 
 ```bash
 git clone https://github.com/Ziad-NasrEldin/no-touch.git
-cd "no-touch"
+cd no-touch
 open WatchRecorder.xcodeproj
 ```
 
-Select the `WatchRecorderApp` scheme and run on your paired Watch — or run the `PhoneRecorderApp` target on iPhone. SwiftPM resolves WhisperKit and MLX automatically on first build.
+Select the `WatchRecorderApp` scheme and run on your paired Watch — or run `PhoneRecorderApp` on iPhone. SwiftPM resolves WhisperKit and MLX automatically on first build.
 
-The iPhone app will prompt you to install a speech model (WhisperKit variant) and a text-intelligence model (MLX Qwen3 variant). Both install once and then work fully offline.
+The iPhone app will prompt you to install a speech model (WhisperKit variant) and a text-intelligence model (MLX Qwen3 variant). Both install once over Wi-Fi, then work fully offline.
 
 ## Status
 

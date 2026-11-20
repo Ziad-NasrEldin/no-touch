@@ -14,7 +14,7 @@ struct ContentView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 8) {
-                Text("Day Recorder")
+                Text("No Touch")
                     .font(.headline)
 
                 Text(state.rawValue)
