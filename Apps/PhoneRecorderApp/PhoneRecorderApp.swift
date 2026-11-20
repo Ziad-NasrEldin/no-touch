@@ -1,9 +1,42 @@
+import os
 import SwiftUI
 import UIKit
 import RecorderContracts
 import PhoneAI
 import PhoneIntegration
 import PhoneStorage
+
+/// Synchronously late-bound policy relay so `SessionCoordinator.makeDefault`
+/// receives its `canDrainNow`, `onDeferredWork`, and `allowsTextModel` closures
+/// before any async work or `WCSession` delivery can trigger a drain.
+private final class DrainPolicyRelay: Sendable {
+    private struct State: @unchecked Sendable {
+        var isPhoneRecording: (@Sendable () async -> Bool)?
+        var onDeferredWork: (@Sendable () -> Void)?
+    }
+
+    private let lock = OSAllocatedUnfairLock(initialState: State())
+
+    func bind(
+        isPhoneRecording: @escaping @Sendable () async -> Bool,
+        onDeferredWork: @escaping @Sendable () -> Void
+    ) {
+        lock.withLock { state in
+            state.isPhoneRecording = isPhoneRecording
+            state.onDeferredWork = onDeferredWork
+        }
+    }
+
+    func isPhoneRecording() async -> Bool {
+        let handler = lock.withLock { $0.isPhoneRecording }
+        return await handler?() ?? false
+    }
+
+    func deferWork() {
+        let handler = lock.withLock { $0.onDeferredWork }
+        handler?()
+    }
+}
 
 /// App-shell model: owns the integration coordinator, BGProcessingTask
 /// registration, model-install progress, manual processing feedback, and live
@@ -64,13 +97,34 @@ final class PhoneRecorderModel: ObservableObject {
     }
 
     init() {
-        if let coordinator = try? SessionCoordinator.makeDefault() {
+        let policyRelay = DrainPolicyRelay()
+        // Configure drain & Metal policy synchronously at coordinator creation
+        // so background launches can never race past `allowsTextModel == false`.
+        let createdCoordinator = try? SessionCoordinator.makeDefault(
+            canDrainNow: {
+                let foregroundOrKeepAlive = await MainActor.run {
+                    UIApplication.shared.applicationState != .background
+                        || BackgroundKeepAlive.isRunning
+                }
+                if foregroundOrKeepAlive { return true }
+                return await policyRelay.isPhoneRecording()
+            },
+            onDeferredWork: {
+                policyRelay.deferWork()
+            },
+            // Text model needs the GPU → foreground only.
+            allowsTextModel: {
+                await MainActor.run { UIApplication.shared.applicationState != .background }
+            }
+        )
+
+        if let coordinator = createdCoordinator {
             self.coordinator = coordinator
             let phoneCapture = PhoneCaptureService(
                 coordinator: coordinator,
                 beforeActivateAudioSession: {
                     await MainActor.run {
-                        BackgroundKeepAlive.shared.stop()
+                        BackgroundKeepAlive.shared.stop(deactivateSession: false)
                     }
                 }
             )
@@ -80,27 +134,23 @@ final class PhoneRecorderModel: ObservableObject {
             let scheduler = BackgroundAnalysisScheduler(coordinator: coordinator)
             scheduler.register()
             bgScheduler = scheduler
-            // Run inference in the foreground, while kept awake for the watch,
-            // or while iPhone local capture holds the active audio session.
-            // MLX text generation remains foreground-only (GPU restriction).
-            Task { [weak self] in
-                await coordinator.setDrainPolicy(
-                    canDrainNow: { [weak self] in
-                        await MainActor.run {
-                            UIApplication.shared.applicationState != .background
-                                || BackgroundKeepAlive.isRunning
-                                || (self?.isPhoneRecording ?? false)
-                        }
-                    },
-                    onDeferredWork: { scheduler.schedule() },
-                    // Text model needs the GPU → foreground only.
-                    allowsTextModel: {
-                        await MainActor.run { UIApplication.shared.applicationState != .background }
-                    }
-                )
-            }
             #endif
             engineLabel = "speech=\(coordinator.speechEngineIdentifier) text=\(coordinator.textEngineIdentifier)"
+            #if os(iOS)
+            policyRelay.bind(
+                isPhoneRecording: { [weak self] in
+                    await MainActor.run { self?.isPhoneRecording ?? false }
+                },
+                onDeferredWork: { scheduler.schedule() }
+            )
+            #else
+            policyRelay.bind(
+                isPhoneRecording: { [weak self] in
+                    await MainActor.run { self?.isPhoneRecording ?? false }
+                },
+                onDeferredWork: {}
+            )
+            #endif
         } else {
             coordinator = nil
             phoneCapture = nil
@@ -482,9 +532,9 @@ struct PhoneRecorderApp: App {
     var body: some Scene {
         WindowGroup {
             TabView {
-                RecordingsView(model: model)
+                RecordingsView(model: model, live: model.live)
                     .tabItem { Label("Recordings", systemImage: "waveform") }
-                NavigationStack { RecordView(model: model) }
+                NavigationStack { RecordView(model: model, live: model.live) }
                     .tabItem { Label("Record", systemImage: "mic.fill") }
                 NavigationStack { ContentView(model: model) }
                     .tabItem { Label("Status", systemImage: "gearshape") }

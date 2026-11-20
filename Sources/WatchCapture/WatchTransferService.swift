@@ -351,16 +351,21 @@ public actor WatchTransferService: WatchTransferServiceProtocol {
             }
             do {
                 try await transport.send(fileAt: url, chunk: entry.chunk)
-                entries[index].status = .inFlight
-                entries[index].attemptCount += 1
-                entries[index].lastAttemptAt = Date()
-                entries[index].lastError = nil
+                guard let currentIndex = entries.firstIndex(where: { $0.chunk.id == entry.chunk.id }) else {
+                    continue
+                }
+                entries[currentIndex].status = .inFlight
+                entries[currentIndex].attemptCount += 1
+                entries[currentIndex].lastAttemptAt = Date()
+                entries[currentIndex].lastError = nil
             } catch {
-                entries[index].lastError = "\(error)"
+                if let currentIndex = entries.firstIndex(where: { $0.chunk.id == entry.chunk.id }) {
+                    entries[currentIndex].lastError = "\(error)"
+                    changed = true
+                }
                 // A dead transport fails the whole batch — stop rather than spin.
                 diagnostics.emit(.transfer, name: "pump-send-failed", severity: .warning,
                                  payload: ["error": "\(error)"])
-                changed = true
                 break
             }
             changed = true
@@ -445,10 +450,18 @@ public actor WatchTransferService: WatchTransferServiceProtocol {
     private func fileFinished(chunkID: UUID, error: String?) async {
         guard let index = entries.firstIndex(where: { $0.chunk.id == chunkID }) else { return }
         if let error {
-            entries[index].status = .queued
             entries[index].lastError = error
-            diagnostics.emit(.transfer, name: "transfer-failed", severity: .warning,
-                             payload: ["chunkID": chunkID.uuidString, "error": error])
+            if entries[index].attemptCount >= Self.maxAttempts {
+                entries[index].status = .failed
+                diagnostics.emit(.transfer, name: "chunk-parked-failed", severity: .error,
+                                 payload: ["chunkID": chunkID.uuidString,
+                                           "attempts": "\(entries[index].attemptCount)",
+                                           "error": error])
+            } else {
+                entries[index].status = .queued
+                diagnostics.emit(.transfer, name: "transfer-failed", severity: .warning,
+                                 payload: ["chunkID": chunkID.uuidString, "error": error])
+            }
         } else {
             entries[index].status = .awaitingAcknowledgment
             diagnostics.emit(.transfer, name: "transfer-delivered", payload: [

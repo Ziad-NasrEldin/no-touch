@@ -48,6 +48,8 @@ public protocol DiagnosticsSink: Sendable {
 public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
     private let database: ArchiveDatabase
     private let layout: ArchiveFileLayout
+    private let jsonEncoder = JSONEncoder()
+    private let jsonDecoder = JSONDecoder()
     private var prepared = false
     private var diagnosticsSinceTrim = 0
     private static let diagnosticsCap = 5000
@@ -191,7 +193,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
                     [.uuid(segment.id), .uuid(segment.chunkID), .uuid(segment.sessionID),
                      .real(segment.startTime), .real(segment.endTime),
                      .date(segment.wallStartTime), .text(segment.text), .text(normalized),
-                     .text(try Self.encode(segment.languageSpans)),
+                     .text(try encode(segment.languageSpans)),
                      segment.confidence.map { .real($0) } ?? .null,
                      segment.speakerID.map { .int(Int64($0)) } ?? .null]
                 )
@@ -262,9 +264,9 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
              metadata.title.map { .text($0) } ?? .null,
              metadata.summary.map { .text($0) } ?? .null,
              metadata.suggestedCategory.map { .text($0) } ?? .null,
-             .text(try Self.encode(metadata.decisions)),
-             .text(try Self.encode(metadata.actionItems)),
-             .text(try Self.encode(metadata.sources)),
+             .text(try encode(metadata.decisions)),
+             .text(try encode(metadata.actionItems)),
+             .text(try encode(metadata.sources)),
              .text(metadata.modelVersion), .date(metadata.generatedAt)]
         )
     }
@@ -353,7 +355,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
             ORDER BY m.position
             """,
             [.uuid(conversationID)],
-            row: Self.mapSegment
+            row: mapSegment
         )
     }
 
@@ -400,12 +402,12 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
             """
         if let kind {
             return try database.querySingle(
-                sql + " AND kind = ? ORDER BY created_at",
+                sql + " AND kind = ? ORDER BY created_at LIMIT 1",
                 [.text(kind.rawValue)],
                 row: Self.mapJob
             )
         }
-        return try database.querySingle(sql + " ORDER BY created_at", row: Self.mapJob)
+        return try database.querySingle(sql + " ORDER BY created_at LIMIT 1", row: Self.mapJob)
     }
 
     public func updateAnalysisJob(_ job: AnalysisJob) async throws {
@@ -487,7 +489,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
              session.failureReason.map { .text($0.rawValue) } ?? .null,
              .date(session.startedAt), .date(session.stoppedAt),
              .date(session.lastConfirmedCaptureAt),
-             .text(try Self.encode(session.interruptionIntervals)),
+             .text(try encode(session.interruptionIntervals)),
              .date(Date())]
         )
     }
@@ -510,7 +512,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
                 startedAt: ArchiveDatabase.optionalDate(statement, 2),
                 stoppedAt: ArchiveDatabase.optionalDate(statement, 3),
                 lastConfirmedCaptureAt: ArchiveDatabase.optionalDate(statement, 4),
-                interruptionIntervals: (try? Self.decode(
+                interruptionIntervals: (try? decode(
                     [InterruptionInterval].self,
                     from: ArchiveDatabase.text(statement, 5)
                 )) ?? []
@@ -535,7 +537,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
                 startedAt: ArchiveDatabase.optionalDate(statement, 3),
                 stoppedAt: ArchiveDatabase.optionalDate(statement, 4),
                 lastConfirmedCaptureAt: ArchiveDatabase.optionalDate(statement, 5),
-                interruptionIntervals: (try? Self.decode(
+                interruptionIntervals: (try? decode(
                     [InterruptionInterval].self,
                     from: ArchiveDatabase.text(statement, 6)
                 )) ?? []
@@ -587,11 +589,11 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
                 title: ArchiveDatabase.optionalText(statement, 0),
                 summary: ArchiveDatabase.optionalText(statement, 1),
                 suggestedCategory: ArchiveDatabase.optionalText(statement, 2),
-                decisions: (try? Self.decode([DecisionItem].self,
+                decisions: (try? decode([DecisionItem].self,
                                              from: ArchiveDatabase.text(statement, 3))) ?? [],
-                actionItems: (try? Self.decode([ActionItem].self,
+                actionItems: (try? decode([ActionItem].self,
                                                from: ArchiveDatabase.text(statement, 4))) ?? [],
-                sources: (try? Self.decode([SourcePassageReference].self,
+                sources: (try? decode([SourcePassageReference].self,
                                            from: ArchiveDatabase.text(statement, 5))) ?? [],
                 modelVersion: ArchiveDatabase.text(statement, 6),
                 generatedAt: ArchiveDatabase.date(statement, 7)
@@ -673,7 +675,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
             """
         let rows = try database.query(sql, params) { statement in
             (
-                segment: Self.mapSegment(statement),
+                segment: mapSegment(statement),
                 conversationID: ArchiveDatabase.optionalUUID(statement, 10)
             )
         }
@@ -777,7 +779,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
             "INSERT INTO diagnostics (id, ts, subsystem, severity, name, payload_json) VALUES (?, ?, ?, ?, ?, ?)",
             [.uuid(event.id), .date(event.timestamp), .text(event.subsystem.rawValue),
              .text(event.severity.rawValue), .text(event.name),
-             .text((try? Self.encode(event.payload)) ?? "{}")]
+             .text((try? encode(event.payload)) ?? "{}")]
         )
         diagnosticsSinceTrim += 1
         if diagnosticsSinceTrim >= Self.diagnosticsTrimInterval {
@@ -810,7 +812,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
                 subsystem: DiagnosticsSubsystem(rawValue: ArchiveDatabase.text(statement, 2)) ?? .storage,
                 severity: DiagnosticsSeverity(rawValue: ArchiveDatabase.text(statement, 3)) ?? .info,
                 name: ArchiveDatabase.text(statement, 4),
-                payload: (try? Self.decode([String: String].self,
+                payload: (try? decode([String: String].self,
                                            from: ArchiveDatabase.text(statement, 5))) ?? [:]
             )
         }
@@ -841,7 +843,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
                 sha256: ArchiveDatabase.text(statement, 3),
                 byteCount: Int(sqlite3_column_int64(statement, 4)),
                 sequenceNumber: Int(sqlite3_column_int64(statement, 5)),
-                metadata: (try? Self.decode(AudioChunkMetadata.self,
+                metadata: (try? decode(AudioChunkMetadata.self,
                                             from: ArchiveDatabase.text(statement, 6)))
                     ?? AudioChunkMetadata(
                         id: id,
@@ -885,7 +887,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
             [.uuid(metadata.id), .uuid(metadata.sessionID), .text(metadata.fileName),
              .text(relativePath), .text(metadata.integrity.sha256Hex.lowercased()),
              .int(Int64(metadata.integrity.byteCount)), .int(Int64(metadata.integrity.sequenceNumber)),
-             .text(try Self.encode(metadata)), .date(receivedAt)]
+             .text(try encode(metadata)), .date(receivedAt)]
         )
     }
 
@@ -899,7 +901,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
             """,
             [.uuid(sessionID)]
         ) { statement in
-            try? Self.decode(AudioChunkMetadata.self,
+            try? decode(AudioChunkMetadata.self,
                              from: ArchiveDatabase.text(statement, 0))
         }.compactMap { $0 }
     }
@@ -912,9 +914,9 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
             """
         if let state {
             return try database.query(sql + " WHERE state = ?", [.text(state)],
-                                      row: Self.mapChunkRecord)
+                                      row: mapChunkRecord)
         }
-        return try database.query(sql, row: Self.mapChunkRecord)
+        return try database.query(sql, row: mapChunkRecord)
     }
 
     /// On-disk path for playback/transcription. Nil unless the chunk is in
@@ -942,8 +944,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
 
     /// Path of the durable destination for `metadata`, relative to the root.
     func relativePath(for metadata: AudioChunkMetadata) -> String {
-        let url = layout.durableFileURL(for: metadata)
-        return url.path.replacingOccurrences(of: layout.root.path + "/", with: "")
+        layout.relativePath(for: layout.durableFileURL(for: metadata))
     }
 
     /// Nonisolated: `layout` is immutable, so the file layout can be read
@@ -1120,7 +1121,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
             ORDER BY c.sequence_number, s.start_time
             """,
             [.uuid(sessionID)],
-            row: Self.mapSegment
+            row: mapSegment
         )
     }
 
@@ -1232,7 +1233,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
             "INSERT INTO diagnostics (id, ts, subsystem, severity, name, payload_json) VALUES (?, ?, ?, ?, ?, ?)",
             [.uuid(UUID()), .date(Date()), .text(DiagnosticsSubsystem.storage.rawValue),
              .text(severity.rawValue), .text(name),
-             .text((try? Self.encode(payload)) ?? "{}")]
+             .text((try? encode(payload)) ?? "{}")]
         )
     }
 
@@ -1249,7 +1250,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
             created_at=excluded.created_at, updated_at=excluded.updated_at
         """
 
-    private static func mapSegment(_ statement: OpaquePointer) -> TranscriptSegment {
+    private func mapSegment(_ statement: OpaquePointer) -> TranscriptSegment {
         TranscriptSegment(
             id: ArchiveDatabase.uuid(statement, 0),
             chunkID: ArchiveDatabase.uuid(statement, 1),
@@ -1290,7 +1291,7 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
          .date(job.createdAt), .date(job.updatedAt)]
     }
 
-    private static func mapChunkRecord(_ statement: OpaquePointer) -> ChunkRecord {
+    private func mapChunkRecord(_ statement: OpaquePointer) -> ChunkRecord {
         let id = ArchiveDatabase.uuid(statement, 0)
         let sessionID = ArchiveDatabase.uuid(statement, 1)
         return ChunkRecord(
@@ -1320,12 +1321,12 @@ public actor SQLiteArchiveStore: ExtendedArchiveStoreProtocol, DiagnosticsSink {
         )
     }
 
-    static func encode<T: Encodable>(_ value: T) throws -> String {
-        let data = try JSONEncoder().encode(value)
+    private func encode<T: Encodable>(_ value: T) throws -> String {
+        let data = try jsonEncoder.encode(value)
         return String(decoding: data, as: UTF8.self)
     }
 
-    static func decode<T: Decodable>(_ type: T.Type, from string: String) throws -> T {
-        try JSONDecoder().decode(type, from: Data(string.utf8))
+    private func decode<T: Decodable>(_ type: T.Type, from string: String) throws -> T {
+        try jsonDecoder.decode(type, from: Data(string.utf8))
     }
 }

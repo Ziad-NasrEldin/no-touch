@@ -499,6 +499,7 @@ public struct URLSessionModelDownloader: ModelContentDownloader {
                 let out = try FileHandle(forWritingTo: partial)
                 let input = try FileHandle(forReadingFrom: staged.file)
                 defer { try? input.close(); try? out.close() }
+                try out.seekToEnd()
                 while let chunk = try input.read(upToCount: 1 << 20), !chunk.isEmpty {
                     try Task.checkCancellation()
                     try out.write(contentsOf: chunk)

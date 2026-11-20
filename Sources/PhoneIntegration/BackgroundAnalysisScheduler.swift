@@ -71,7 +71,7 @@ public final class BackgroundAnalysisScheduler: @unchecked Sendable {
         // `setTaskCompleted` is documented callable from any thread; BGTask
         // is not Sendable so box it for the `sending` Task closure.
         let boxed = UncheckedSendableBox(task)
-        let drain = Task { [weak self, boxed] in
+        let drain = Task(priority: .background) { [weak self, boxed] in
             let task = boxed.value
             guard let self else {
                 task.setTaskCompleted(success: false)

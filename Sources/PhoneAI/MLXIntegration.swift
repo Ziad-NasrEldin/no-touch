@@ -3,6 +3,9 @@ import RecorderContracts
 
 #if canImport(MLXLLM) && canImport(MLXLMCommon)
 import Hub
+#if canImport(MLX)
+import MLX
+#endif
 import MLXLLM
 import MLXLMCommon
 
@@ -22,7 +25,9 @@ public actor MLXChatTextEngine: TextIntelligenceEngine {
     private var container: ModelContainer?
 
     /// Bounds KV cache growth for a small on-device model.
-    private let maxKVSize = 4_096
+    private let maxKVSize = 2_048
+    /// Caps MLX's Metal buffer cache on 6 GB iOS devices.
+    private static let metalCacheLimitBytes = 20 * 1024 * 1024
 
     public init(descriptor: ModelDescriptor) {
         guard case .mlxRepository(let id, let revision) = descriptor.installMethod else {
@@ -40,6 +45,9 @@ public actor MLXChatTextEngine: TextIntelligenceEngine {
             "MLX Metal inference is unavailable on iOS Simulator — run on a physical Apple Silicon iPhone"
         )
         #else
+        #if canImport(MLX)
+        MLX.Memory.cacheLimit = Self.metalCacheLimitBytes
+        #endif
         _ = LLMRegistry.shared // force MLXLLM trampoline registration
         if let directory {
             container = try await loadModelContainer(directory: directory) { _ in }
@@ -53,6 +61,9 @@ public actor MLXChatTextEngine: TextIntelligenceEngine {
 
     public func unload() async {
         container = nil
+        #if canImport(MLX) && !targetEnvironment(simulator)
+        MLX.Memory.clearCache()
+        #endif
     }
 
     public func complete(_ request: TextCompletionRequest) async throws -> TextCompletionResult {
@@ -67,7 +78,12 @@ public actor MLXChatTextEngine: TextIntelligenceEngine {
             topP: 0.9,
             repetitionPenalty: 1.05
         )
-        let session = ChatSession(container, instructions: request.systemPrompt, generateParameters: parameters)
+        let session = ChatSession(
+            container,
+            instructions: request.systemPrompt,
+            generateParameters: parameters,
+            additionalContext: ["enable_thinking": false]
+        )
         let text = try await session.respond(to: request.userPrompt)
         try Task.checkCancellation()
         return TextCompletionResult(text: text)

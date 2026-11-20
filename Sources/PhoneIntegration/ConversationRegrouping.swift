@@ -11,15 +11,16 @@ import RecorderContracts
 /// tail in place, and make membership-change detection honest.
 public enum ConversationRegrouping {
     public struct Plan: Sendable {
-        /// Proposals to persist — adopted proposals carry the matched
-        /// existing group's id; unmatched proposals keep their fresh ids.
+        /// Proposals to persist — only new groups and adopted groups whose
+        /// fields actually changed (avoids rewriting unchanged membership rows).
         public var upserts: [ConversationGroup]
         /// Persisted groups that no proposal claimed — their spans were
         /// reshuffled elsewhere (delete without tombstoning).
         public var disbandedIDs: [UUID]
-        /// Conversation ids needing (re-)generated metadata: new groups and
-        /// adopted groups whose membership changed. Provisionality flips
-        /// alone do not enqueue — metadata doesn't depend on it.
+        /// Conversation ids needing (re-)generated metadata: settled groups
+        /// that are new, newly settled, or whose membership changed. Provisional
+        /// groups are skipped during automatic passes and only targeted when
+        /// `includeProvisional` is true (explicit manual processing).
         public var intelligenceTargets: [UUID]
 
         public init(upserts: [ConversationGroup], disbandedIDs: [UUID], intelligenceTargets: [UUID]) {
@@ -34,7 +35,8 @@ public enum ConversationRegrouping {
     /// existing group can be adopted by at most one proposal.
     public static func plan(
         proposals: [ConversationGroup],
-        existing: [ConversationGroup]
+        existing: [ConversationGroup],
+        includeProvisional: Bool = false
     ) -> Plan {
         var upserts: [ConversationGroup] = []
         var disbanded: [UUID] = []
@@ -60,13 +62,22 @@ public enum ConversationRegrouping {
                 claimed.insert(adopted.id)
                 proposal.id = adopted.id
                 let membershipChanged = adopted.segmentIDs != proposal.segmentIDs
-                upserts.append(proposal)
-                if membershipChanged {
+                let becameSettled = adopted.isProvisional && !proposal.isProvisional
+                if proposal != adopted {
+                    upserts.append(proposal)
+                }
+                if !proposal.isProvisional {
+                    if membershipChanged || becameSettled {
+                        targets.append(adopted.id)
+                    }
+                } else if includeProvisional {
                     targets.append(adopted.id)
                 }
             } else {
                 upserts.append(proposal)
-                targets.append(proposal.id)
+                if !proposal.isProvisional || includeProvisional {
+                    targets.append(proposal.id)
+                }
             }
         }
 

@@ -352,9 +352,7 @@ public actor PhoneReceiveService: PhoneFileIngestProtocol {
                 at: sessionDir, includingPropertiesForKeys: nil
             ) else { continue }
             for file in files {
-                let relative = file.path.replacingOccurrences(
-                    of: layout.root.path + "/", with: ""
-                )
+                let relative = layout.relativePath(for: file)
                 if !registeredPaths.contains(relative) {
                     quarantine(file, reason: "unregistered")
                     await emit(name: "storage.orphan_quarantined", severity: .warning,

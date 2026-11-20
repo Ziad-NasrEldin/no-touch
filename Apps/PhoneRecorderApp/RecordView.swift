@@ -8,8 +8,8 @@ import PhoneIntegration
 /// microphone permission state, failure reasons, and interruption gaps.
 struct RecordView: View {
     @ObservedObject var model: PhoneRecorderModel
+    @ObservedObject var live: LiveRecordingStatus
     @Environment(\.openURL) private var openURL
-    @State private var pulse = false
 
     private var session: RecordingSession? { model.phoneSession }
     private var state: SessionState { session?.state ?? .idle }
@@ -42,7 +42,7 @@ struct RecordView: View {
                 }
             }
 
-            if model.live.isLive && model.live.source == .watch && state != .recording {
+            if live.isLive && live.source == .watch && state != .recording {
                 Section {
                     Label("An Apple Watch recording session is currently active.", systemImage: "applewatch.radiowaves.left.and.right")
                         .font(.footnote)
@@ -141,9 +141,6 @@ struct RecordView: View {
         .task {
             await model.refreshPhoneCaptureState()
         }
-        .onAppear {
-            Task { await model.refreshPhoneCaptureState() }
-        }
     }
 
     // MARK: - Subviews
@@ -154,19 +151,10 @@ struct RecordView: View {
                 Circle()
                     .fill(stateColor.opacity(0.2))
                     .frame(width: 48, height: 48)
-                    .scaleEffect(pulse && state == .recording ? 1.2 : 1)
-                    .animation(
-                        state == .recording
-                            ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
-                            : .default,
-                        value: pulse
-                    )
                 Image(systemName: stateSymbol)
                     .font(.title3)
                     .foregroundStyle(stateColor)
             }
-            .onAppear { pulse = true }
-            .onDisappear { pulse = false }
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(stateTitle)

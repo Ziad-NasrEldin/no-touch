@@ -85,9 +85,15 @@ public final class WatchConnectivityReceiveTransport: NSObject, @unchecked Senda
     /// session/conversation intents flush through their cascaded chunk
     /// tombstones and are marked propagated once those are queued.
     public func flushDeletionIntents() {
+        guard session.activationState == .activated,
+              session.isPaired,
+              session.isWatchAppInstalled else { return }
         Task {
             guard let intents = try? await archiveStore.unpropagatedDeletionIntents(),
                   !intents.isEmpty else { return }
+            guard session.activationState == .activated,
+                  session.isPaired,
+                  session.isWatchAppInstalled else { return }
             for intent in intents where intent.target == .chunk {
                 session.transferUserInfo([
                     Keys.messageType: Keys.typeDiscard,
@@ -192,10 +198,13 @@ extension WatchConnectivityReceiveTransport: WCSessionDelegate {
                     at: landing, metadata: metadata
                 )
                 send(acknowledgment: ack)
-                NotificationCenter.default.post(
-                    name: RecorderLiveNotifications.chunkDidArrive, object: nil,
-                    userInfo: ["sessionID": metadata.sessionID]
-                )
+                let sessionID = metadata.sessionID
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: RecorderLiveNotifications.chunkDidArrive, object: nil,
+                        userInfo: ["sessionID": sessionID]
+                    )
+                }
                 emitTransferDiag(name: "transfer.ack_sent", payload: [
                     "chunk_id": metadata.id.uuidString,
                     "status": ack.status.rawValue,
@@ -268,10 +277,12 @@ extension WatchConnectivityReceiveTransport: WCSessionDelegate {
         Task {
             do {
                 try await archiveStore.upsertSession(snapshot)
-                NotificationCenter.default.post(
-                    name: RecorderLiveNotifications.sessionDidChange, object: nil,
-                    userInfo: ["session": snapshot]
-                )
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: RecorderLiveNotifications.sessionDidChange, object: nil,
+                        userInfo: ["session": snapshot]
+                    )
+                }
                 emitTransferDiag(name: "transfer.session_received", payload: [
                     "session_id": snapshot.id.uuidString,
                     "state": snapshot.state.rawValue,

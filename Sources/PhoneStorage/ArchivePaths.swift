@@ -30,7 +30,7 @@ public struct ArchiveFileLayout: Sendable, Equatable {
     public static let environmentOverrideKey = "RECORDER_ARCHIVE_DIR"
 
     public init(root: URL, excludeDerivedDataFromBackup: Bool = true) {
-        self.root = root
+        self.root = root.resolvingSymlinksInPath().standardizedFileURL
         self.excludeDerivedDataFromBackup = excludeDerivedDataFromBackup
     }
 
@@ -111,5 +111,18 @@ extension ArchiveFileLayout {
     public func durableFileURL(for chunk: AudioChunkMetadata) -> URL {
         sessionChunksDirectory(sessionID: chunk.sessionID)
             .appendingPathComponent(durableFileName(for: chunk))
+    }
+
+    /// Computes a canonical relative path under `root`, normalizing symlinks
+    /// (e.g. `/var` vs `/private/var`) so registry paths and filesystem scans
+    /// always agree.
+    public func relativePath(for fileURL: URL) -> String {
+        let normalizedRoot = root.resolvingSymlinksInPath().standardizedFileURL.path
+        let normalizedFile = fileURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let prefix = normalizedRoot.hasSuffix("/") ? normalizedRoot : normalizedRoot + "/"
+        if normalizedFile.hasPrefix(prefix) {
+            return String(normalizedFile.dropFirst(prefix.count))
+        }
+        return normalizedFile
     }
 }

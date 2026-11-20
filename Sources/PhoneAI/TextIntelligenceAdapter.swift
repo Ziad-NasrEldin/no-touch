@@ -26,7 +26,7 @@ public struct TextIntelligenceConfiguration: Sendable {
         maxBoundaryReviews: Int = 8,
         enableModelBoundaryRefinement: Bool = true,
         categories: [String] = ["عمل", "شخصي", "تخطيط", "أفكار", "عائلة", "صحة", "ماليات", "أخرى"],
-        metadataMaxTokens: Int = 900,
+        metadataMaxTokens: Int = 512,
         temperature: Double = 0.2,
         boundaryContextSegments: Int = 5
     ) {
@@ -60,7 +60,14 @@ public actor TextIntelligenceAdapter: TextIntelligenceAdapterProtocol, EngineBac
     private let configuration: TextIntelligenceConfiguration
     private let diagnostics: @Sendable (DiagnosticsEvent) -> Void
 
+    private struct BoundaryKey: Hashable {
+        let earlierSegmentID: UUID
+        let laterSegmentID: UUID
+    }
+
     private let heuristic: ConversationGroupingHeuristic
+    private var boundaryDecisionCache: [BoundaryKey: Bool] = [:]
+    private static let maxCachedBoundaryDecisions = 2_048
 
     public init(
         engine: any TextIntelligenceEngine,
@@ -88,10 +95,26 @@ public actor TextIntelligenceAdapter: TextIntelligenceAdapterProtocol, EngineBac
         sessionID: UUID,
         segments: [TranscriptSegment]
     ) async throws -> [ConversationGroup] {
+        try await proposeConversationGroups(
+            sessionID: sessionID,
+            segments: segments,
+            allowModelRefinement: true
+        )
+    }
+
+    /// Extended grouping entry point that lets callers suppress LLM boundary
+    /// refinement (e.g. for live provisional sessions) and receive a callback
+    /// immediately before the text model is loaded for an uncached boundary.
+    public func proposeConversationGroups(
+        sessionID: UUID,
+        segments: [TranscriptSegment],
+        allowModelRefinement: Bool,
+        beforeModelLoad: (@Sendable () async -> Void)? = nil
+    ) async throws -> [ConversationGroup] {
         try Task.checkCancellation()
         var groups = heuristic.propose(sessionID: sessionID, segments: segments)
 
-        guard configuration.enableModelBoundaryRefinement, groups.count > 1 else {
+        guard allowModelRefinement, configuration.enableModelBoundaryRefinement, groups.count > 1 else {
             return groups
         }
         guard let installed = try await readyInstallDirectoryIfAny() else {
@@ -108,7 +131,8 @@ public actor TextIntelligenceAdapter: TextIntelligenceAdapterProtocol, EngineBac
             candidates: candidates,
             groups: groups,
             segments: segments,
-            installedAt: installed
+            installedAt: installed,
+            beforeModelLoad: beforeModelLoad
         )
         for index in merges.sorted(by: >) {
             if let merged = heuristic.merge(groups: groups, at: index) {
@@ -248,21 +272,42 @@ public actor TextIntelligenceAdapter: TextIntelligenceAdapterProtocol, EngineBac
 
     /// Reviews boundary candidates through the engine. Failures degrade to
     /// "no merges" — grouping quality must never throw away the heuristic.
+    /// Decisions are cached in memory per `(earlierSegmentID, laterSegmentID)`
+    /// so subsequent regroups never re-invoke the LLM on already-reviewed pairs.
     private func reviewBoundaries(
         candidates: [ConversationGroupingHeuristic.BoundaryCandidate],
         groups: [ConversationGroup],
         segments: [TranscriptSegment],
-        installedAt: URL?
+        installedAt: URL?,
+        beforeModelLoad: (@Sendable () async -> Void)?
     ) async -> [Int] {
         let byID = Dictionary(uniqueKeysWithValues: segments.map { ($0.id, $0) })
         var mergeIndices: [Int] = []
+        var notifiedModelLoad = false
 
         for candidate in candidates {
             if Task.isCancelled { break }
-            let earlierIDs = groups[candidate.laterGroupIndex - 1].segmentIDs.suffix(
+            let earlierGroup = groups[candidate.laterGroupIndex - 1]
+            let laterGroup = groups[candidate.laterGroupIndex]
+            guard let earlierBoundaryID = earlierGroup.segmentIDs.last,
+                  let laterBoundaryID = laterGroup.segmentIDs.first
+            else { continue }
+
+            let key = BoundaryKey(
+                earlierSegmentID: earlierBoundaryID,
+                laterSegmentID: laterBoundaryID
+            )
+            if let cachedDecision = boundaryDecisionCache[key] {
+                if cachedDecision {
+                    mergeIndices.append(candidate.laterGroupIndex)
+                }
+                continue
+            }
+
+            let earlierIDs = earlierGroup.segmentIDs.suffix(
                 configuration.boundaryContextSegments
             )
-            let laterIDs = groups[candidate.laterGroupIndex].segmentIDs.prefix(
+            let laterIDs = laterGroup.segmentIDs.prefix(
                 configuration.boundaryContextSegments
             )
             let earlierText = earlierIDs.compactMap { byID[$0]?.text }.joined(separator: "\n")
@@ -289,13 +334,24 @@ public actor TextIntelligenceAdapter: TextIntelligenceAdapterProtocol, EngineBac
                 temperature: 0
             )
 
+            if !notifiedModelLoad {
+                notifiedModelLoad = true
+                await beforeModelLoad?()
+            }
+
             do {
                 let engine = self.engine
                 let result = try await gate.withExclusiveAccess {
                     try await engine.load(installedAt: installedAt)
                     return try await engine.complete(request)
                 }
-                if result.text.contains("\"merge\""), result.text.contains("true") {
+                let cleaned = MetadataResponseParser.stripThinkingBlocks(from: result.text)
+                let shouldMerge = cleaned.contains("\"merge\"") && cleaned.contains("true")
+                if boundaryDecisionCache.count >= Self.maxCachedBoundaryDecisions {
+                    boundaryDecisionCache.removeAll(keepingCapacity: true)
+                }
+                boundaryDecisionCache[key] = shouldMerge
+                if shouldMerge {
                     mergeIndices.append(candidate.laterGroupIndex)
                 }
             } catch {

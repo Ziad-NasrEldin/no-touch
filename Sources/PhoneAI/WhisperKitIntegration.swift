@@ -26,6 +26,7 @@ public actor WhisperKitSpeechEngine: SpeechTranscriptionEngine {
     private var speakerModelsBase: URL?
     #if canImport(SpeakerKit)
     private var speakerKit: SpeakerKit?
+    private var speakerModelUnavailable = false
     #endif
 
     public init(descriptor: ModelDescriptor) {
@@ -63,6 +64,9 @@ public actor WhisperKitSpeechEngine: SpeechTranscriptionEngine {
         pipe = try await WhisperKit(config)
         // Speaker models live next to the speech model install.
         speakerModelsBase = directory.deletingLastPathComponent().appendingPathComponent("speakerkit", isDirectory: true)
+        #if canImport(SpeakerKit)
+        speakerModelUnavailable = false
+        #endif
     }
 
     public func unload() async {
@@ -73,6 +77,7 @@ public actor WhisperKitSpeechEngine: SpeechTranscriptionEngine {
         #if canImport(SpeakerKit)
         if let speakerKit { await speakerKit.unloadModels() }
         speakerKit = nil
+        speakerModelUnavailable = false
         #endif
     }
 
@@ -94,6 +99,7 @@ public actor WhisperKitSpeechEngine: SpeechTranscriptionEngine {
             language: nil,
             detectLanguage: true,
             wordTimestamps: true,
+            concurrentWorkerCount: 1,
             chunkingStrategy: .vad
         )
         let results = try await pipe.transcribe(audioArray: samples, decodeOptions: options)
@@ -143,17 +149,27 @@ public actor WhisperKitSpeechEngine: SpeechTranscriptionEngine {
         mediaTimeOffset: TimeInterval
     ) async {
         #if canImport(SpeakerKit)
+        guard !speakerModelUnavailable else { return }
         do {
             if speakerKit == nil {
-                if let base = speakerModelsBase {
-                    try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+                // Inference must stay strictly offline: never download from
+                // Hugging Face here; skip diarization cleanly when SpeakerKit
+                // weights are not already present locally.
+                guard let base = speakerModelsBase,
+                      FileManager.default.fileExists(atPath: base.path)
+                else {
+                    speakerModelUnavailable = true
+                    return
                 }
                 speakerKit = try await SpeakerKit(PyannoteConfig(
-                    downloadBase: speakerModelsBase?.path,
-                    download: true,
+                    downloadBase: base.path,
+                    download: false,
                     load: true,
                     verbose: false,
-                    logLevel: .error
+                    logLevel: .error,
+                    fullRedundancy: false,
+                    concurrentSegmenterWorkers: 1,
+                    concurrentEmbedderWorkers: 1
                 ))
             }
             guard let speakerKit else { return }
@@ -181,7 +197,11 @@ public actor WhisperKitSpeechEngine: SpeechTranscriptionEngine {
                 }
             }
         } catch {
-            // Diarization is optional; keep the transcript.
+            // Diarization is optional; keep the transcript and avoid retrying
+            // missing local models on every subsequent chunk.
+            if speakerKit == nil {
+                speakerModelUnavailable = true
+            }
         }
         #endif
     }

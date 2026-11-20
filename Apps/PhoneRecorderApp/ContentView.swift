@@ -125,7 +125,6 @@ struct ContentView: View {
         .navigationTitle("No Touch")
         .refreshable { await model.refresh() }
         .task { await model.refresh() }
-        .onAppear { Task { await model.refresh() } }
     }
 }
 
@@ -184,13 +183,18 @@ private struct ModelStatusRow: View {
         }
     }
 
-    private var byteSummary: String? {
-        guard downloadedBytes > 0 else { return nil }
+    @MainActor
+    private static let byteFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
-        let done = formatter.string(fromByteCount: downloadedBytes)
+        return formatter
+    }()
+
+    private var byteSummary: String? {
+        guard downloadedBytes > 0 else { return nil }
+        let done = Self.byteFormatter.string(fromByteCount: downloadedBytes)
         if let expectedBytes, expectedBytes > 0 {
-            let total = formatter.string(fromByteCount: expectedBytes)
+            let total = Self.byteFormatter.string(fromByteCount: expectedBytes)
             return "\(done) / \(total)"
         }
         return done

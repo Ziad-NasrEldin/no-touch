@@ -10,15 +10,28 @@ public struct SpeechAdapterConfiguration: Sendable {
     /// Keep engine segments with empty text (VAD-only engines emit them as
     /// speech-activity evidence). Real engines rarely produce empty text.
     public var emitEmptySegments: Bool
+    /// Skip chunks that contain no audible speech before acquiring
+    /// `ModelExecutionGate` or loading WhisperKit.
+    public var skipSilentChunks: Bool
+    /// Minimum capture-reported speech seconds before trusting VAD silence.
+    public var minimumSpeechSeconds: TimeInterval
+    /// Peak 0.5 s window RMS below which a chunk is treated as silent.
+    public var silentPeakWindowRMSThreshold: Float
 
     public init(
         maxAudioSeconds: TimeInterval = 300,
         targetSampleRate: Int = 16_000,
-        emitEmptySegments: Bool = true
+        emitEmptySegments: Bool = true,
+        skipSilentChunks: Bool = true,
+        minimumSpeechSeconds: TimeInterval = 0.5,
+        silentPeakWindowRMSThreshold: Float = 0.003
     ) {
         self.maxAudioSeconds = maxAudioSeconds
         self.targetSampleRate = targetSampleRate
         self.emitEmptySegments = emitEmptySegments
+        self.skipSilentChunks = skipSilentChunks
+        self.minimumSpeechSeconds = minimumSpeechSeconds
+        self.silentPeakWindowRMSThreshold = silentPeakWindowRMSThreshold
     }
 }
 
@@ -69,7 +82,7 @@ public actor SpeechTranscriptionAdapter: SpeechTranscriptionAdapterProtocol, Eng
 
         let targetRate = configuration.targetSampleRate
         let maxSeconds = configuration.maxAudioSeconds
-        let decoded = try await Task.detached(priority: .userInitiated) {
+        let decoded = try await Task.detached(priority: .utility) {
             try AudioChunkDecoder.decode(
                 fileAt: audioFileURL,
                 targetSampleRate: targetRate,
@@ -77,6 +90,30 @@ public actor SpeechTranscriptionAdapter: SpeechTranscriptionAdapterProtocol, Eng
             )
         }.value
         guard !decoded.samples.isEmpty else { return [] }
+
+        if configuration.skipSilentChunks {
+            let peakRMS = Self.peakWindowRMS(samples: decoded.samples, sampleRate: decoded.sampleRate)
+            let vadSpeech = chunk.integrity.voiceActivity?.speechSeconds
+            let vadSilence = chunk.integrity.voiceActivity?.silenceSeconds ?? 0
+            let vadSaysSilent = vadSpeech.map {
+                $0 < configuration.minimumSpeechSeconds && (vadSilence > 0 || $0 == 0)
+            } ?? false
+            let isSilent = peakRMS < configuration.silentPeakWindowRMSThreshold
+                || (vadSaysSilent && peakRMS < configuration.silentPeakWindowRMSThreshold * 2)
+            if isSilent {
+                diagnostics(DiagnosticsEvent(
+                    subsystem: .ai,
+                    name: "transcription.skipped_silent",
+                    payload: [
+                        "engine": engine.engineIdentifier,
+                        "chunkID": chunk.id.uuidString,
+                        "audioSeconds": String(format: "%.1f", decoded.duration),
+                        "peakRMS": String(format: "%.5f", peakRMS),
+                    ]
+                ))
+                return []
+            }
+        }
 
         let installedDirectory = try await readyInstallDirectory()
         let engine = self.engine
@@ -152,6 +189,31 @@ public actor SpeechTranscriptionAdapter: SpeechTranscriptionAdapterProtocol, Eng
             throw RecorderError.modelNotReady
         }
         return directory
+    }
+
+    /// Cheap peak 0.5 s window RMS across decoded mono Float32 PCM samples.
+    /// Using a short window rather than a whole-chunk average preserves brief
+    /// utterances inside an otherwise quiet 60 s clip while still rejecting
+    /// pure silence / noise-floor chunks before loading WhisperKit.
+    private static func peakWindowRMS(samples: [Float], sampleRate: Int) -> Float {
+        guard !samples.isEmpty else { return 0 }
+        let windowSize = max(1, sampleRate / 2)
+        var maxMeanSquare: Float = 0
+        var offset = 0
+        while offset < samples.count {
+            let end = min(offset + windowSize, samples.count)
+            var sumSq: Float = 0
+            for i in offset..<end {
+                let s = samples[i]
+                sumSq += s * s
+            }
+            let meanSq = sumSq / Float(end - offset)
+            if meanSq > maxMeanSquare {
+                maxMeanSquare = meanSq
+            }
+            offset = end
+        }
+        return maxMeanSquare.squareRoot()
     }
 
     private func map(

@@ -46,13 +46,19 @@ public actor SessionCoordinator {
     /// GPU/ANE-heavy inference never starts during a short WatchConnectivity
     /// wake — that work belongs to the BGProcessingTask, which calls
     /// `processAnalysisQueue` directly.
-    private var canDrainNow: @Sendable () async -> Bool = { true }
+    private var canDrainNow: @Sendable () async -> Bool
     /// Called when work is queued but this process can't run it now.
-    private var onDeferredWork: @Sendable () -> Void = {}
+    private var onDeferredWork: @Sendable () -> Void
     /// The text model (MLX) runs on the GPU, which iOS only allows in the
-    /// foreground. While this returns false, grouping + summaries wait and
-    /// only transcription (Neural Engine) runs.
-    private var allowsTextModel: @Sendable () async -> Bool = { true }
+    /// foreground. Defaults to false until explicitly configured so Metal
+    /// inference can never fire during a background startup race.
+    private var allowsTextModel: @Sendable () async -> Bool
+
+    private var speechModelMayBeLoaded = false
+    private var textModelMayBeLoaded = false
+    private var speechIdleUnloadTask: Task<Void, Never>?
+    private static let speechIdleUnloadDelay: Duration = .seconds(90)
+    private static let fairThermalCooldown: Duration = .milliseconds(1_500)
 
     /// Jobs that failed fewer times than this are retried automatically.
     public static let maxAutomaticAttempts = 3
@@ -60,7 +66,7 @@ public actor SessionCoordinator {
     public func setDrainPolicy(
         canDrainNow: @escaping @Sendable () async -> Bool,
         onDeferredWork: @escaping @Sendable () -> Void,
-        allowsTextModel: @escaping @Sendable () async -> Bool = { true }
+        allowsTextModel: @escaping @Sendable () async -> Bool = { false }
     ) {
         self.canDrainNow = canDrainNow
         self.onDeferredWork = onDeferredWork
@@ -70,21 +76,78 @@ public actor SessionCoordinator {
     #if os(iOS) && canImport(WatchConnectivity)
     private let transport: WatchConnectivityReceiveTransport
     #endif
-    #if os(iOS) && canImport(UIKit)
-    /// Owns the memory-warning observer registration (the token unregisters
+    /// Owns `NotificationCenter` observer registrations (each token unregisters
     /// on its own deinit, so the actor needs no deinit isolation juggling).
-    /// Lazy so the observer closure's `self` capture always happens after
-    /// init completes; forced on first `activate()`.
-    private lazy var memoryWarningToken: ObserverToken? = ObserverToken(
-        NotificationCenter.default.addObserver(
-            forName: UIApplication.didReceiveMemoryWarningNotification,
-            object: nil,
-            queue: nil
-        ) { [weak self] _ in
-            Task { [weak self] in await self?.releaseModelMemory() }
-        }
-    )
-    #endif
+    /// Lazy so observer closures capture `self` after init completes; forced on
+    /// first `activate()`.
+    private lazy var lifecycleObserverTokens: [ObserverToken] = {
+        var tokens: [ObserverToken] = []
+        let center = NotificationCenter.default
+        #if os(iOS) && canImport(UIKit)
+        tokens.append(ObserverToken(
+            center.addObserver(
+                forName: UIApplication.didReceiveMemoryWarningNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                Task(priority: .utility) { [weak self] in
+                    await self?.releaseModelMemory(reason: "memory_pressure")
+                }
+            }
+        ))
+        tokens.append(ObserverToken(
+            center.addObserver(
+                forName: UIDevice.batteryStateDidChangeNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                Task(priority: .utility) { [weak self] in
+                    await self?.handlePowerOrBatteryChange()
+                }
+            }
+        ))
+        #endif
+        tokens.append(ObserverToken(
+            center.addObserver(
+                forName: ProcessInfo.thermalStateDidChangeNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                Task(priority: .utility) { [weak self] in
+                    await self?.handleThermalStateChange()
+                }
+            }
+        ))
+        tokens.append(ObserverToken(
+            center.addObserver(
+                forName: Notification.Name.NSProcessInfoPowerStateDidChange,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                Task(priority: .utility) { [weak self] in
+                    await self?.handlePowerOrBatteryChange()
+                }
+            }
+        ))
+        tokens.append(ObserverToken(
+            center.addObserver(
+                forName: RecorderLiveNotifications.sessionDidChange,
+                object: nil,
+                queue: nil
+            ) { [weak self] note in
+                guard let session = note.userInfo?["session"] as? RecordingSession,
+                      session.state == .stopped else { return }
+                Task(priority: .utility) { [weak self] in
+                    await self?.scheduleDrain()
+                }
+            }
+        ))
+        return tokens
+    }()
+
+    deinit {
+        speechIdleUnloadTask?.cancel()
+    }
 
     // MARK: - Construction
 
@@ -96,7 +159,10 @@ public actor SessionCoordinator {
     public static func makeDefault(
         speechDescriptor: ModelDescriptor = PhoneAIModelCatalog.whisperLargeV3Turbo,
         textDescriptor: ModelDescriptor = PhoneAIModelCatalog.qwen3_1_7b_4bit,
-        modelsRoot: URL? = nil
+        modelsRoot: URL? = nil,
+        canDrainNow: @escaping @Sendable () async -> Bool = { true },
+        onDeferredWork: @escaping @Sendable () -> Void = {},
+        allowsTextModel: @escaping @Sendable () async -> Bool = { false }
     ) throws -> SessionCoordinator {
         let root = try modelsRoot ?? PhoneAI.modelsRootDirectory()
         let store = SQLiteArchiveStore()
@@ -136,7 +202,10 @@ public actor SessionCoordinator {
             receiveService: receiveService,
             store: store,
             transcriber: transcriber,
-            intelligence: intelligence
+            intelligence: intelligence,
+            canDrainNow: canDrainNow,
+            onDeferredWork: onDeferredWork,
+            allowsTextModel: allowsTextModel
         )
         // Late-bind the kick — the receive hook is constructed before the
         // coordinator exists. A fired kick schedules one bounded drain
@@ -153,12 +222,18 @@ public actor SessionCoordinator {
         receiveService: PhoneReceiveService,
         store: SQLiteArchiveStore,
         transcriber: SpeechTranscriptionAdapter,
-        intelligence: TextIntelligenceAdapter
+        intelligence: TextIntelligenceAdapter,
+        canDrainNow: @escaping @Sendable () async -> Bool = { true },
+        onDeferredWork: @escaping @Sendable () -> Void = {},
+        allowsTextModel: @escaping @Sendable () async -> Bool = { false }
     ) {
         self.receiveService = receiveService
         self.store = store
         self.transcriber = transcriber
         self.intelligence = intelligence
+        self.canDrainNow = canDrainNow
+        self.onDeferredWork = onDeferredWork
+        self.allowsTextModel = allowsTextModel
         self.runner = AnalysisJobRunner(dependencies: .init(
             archive: store,
             transcriber: transcriber,
@@ -184,8 +259,11 @@ public actor SessionCoordinator {
     /// deletion propagation, reconciles missed enqueues, then drains the
     /// queue. Idempotent — safe to call on every foreground.
     public func activate() async {
+        _ = lifecycleObserverTokens // bind thermal, power, session & memory observers once
         #if os(iOS) && canImport(UIKit)
-        _ = memoryWarningToken // bind the memory-warning observer once (lazy)
+        await MainActor.run {
+            UIDevice.current.isBatteryMonitoringEnabled = true
+        }
         #endif
         do {
             try await receiveService.prepare()
@@ -233,10 +311,14 @@ public actor SessionCoordinator {
     /// `UIApplication.didReceiveMemoryWarningNotification` on iOS; other
     /// embedders can call it directly from their own pressure seam.
     /// Job outcomes are unaffected — only residency drops.
-    public func releaseModelMemory() async {
+    public func releaseModelMemory(reason: String = "memory_pressure") async {
+        speechIdleUnloadTask?.cancel()
+        speechIdleUnloadTask = nil
         await transcriber.unloadEngine()
+        speechModelMayBeLoaded = false
         await intelligence.unloadEngine()
-        await emit(.warning, "integration.models_unloaded", ["reason": "memory_pressure"])
+        textModelMayBeLoaded = false
+        await emit(.warning, "integration.models_unloaded", ["reason": reason])
     }
 
     // MARK: - Ingest (data-path seam)
@@ -271,6 +353,9 @@ public actor SessionCoordinator {
         do {
             try await store.upsertSession(session)
             notifyLocalSessionDidChange(session)
+            if session.state == .stopped {
+                scheduleDrain()
+            }
         } catch {
             await emit(.error, "integration.local_session_upsert_failed", [
                 "session_id": session.id.uuidString,
@@ -303,7 +388,7 @@ public actor SessionCoordinator {
     /// fold into at most one extra pass after the current one. Nonisolated
     /// so UI/BG callers can fire without awaiting.
     public nonisolated func kickProcessing() {
-        Task { await self.scheduleDrain() }
+        Task(priority: .utility) { await self.scheduleDrain() }
     }
 
     // MARK: - Analysis pipeline
@@ -314,10 +399,20 @@ public actor SessionCoordinator {
     /// Serialized via `acquireDrainSlot()` so concurrent callers (manual tap,
     /// automatic chunk kick, BGProcessingTask) never interleave or unload an
     /// engine while another pass is actively using it.
-    public func processAnalysisQueue(maxJobsPerKind: Int = 24) async -> DrainSummary {
+    public func processAnalysisQueue(
+        maxJobsPerKind: Int = 24,
+        isManual: Bool = false
+    ) async -> DrainSummary {
         await acquireDrainSlot()
         defer { releaseDrainSlot() }
         if Task.isCancelled { return DrainSummary() }
+
+        speechIdleUnloadTask?.cancel()
+        speechIdleUnloadTask = nil
+
+        if !isManual, !(await canContinueAutomaticWork()) {
+            return DrainSummary()
+        }
 
         var summary = DrainSummary()
 
@@ -325,6 +420,13 @@ public actor SessionCoordinator {
         var dirtySessions = Set<UUID>()
         let speechReady = await transcriber.readiness() == .ready
         while speechReady, summary.transcriptionJobs < maxJobsPerKind, !Task.isCancelled {
+            if !isManual {
+                guard await canContinueAutomaticWork() else { break }
+                if summary.transcriptionJobs > 0 {
+                    await thermalCooldownIfNeeded()
+                    if Task.isCancelled { break }
+                }
+            }
             let job: AnalysisJob?
             do {
                 job = try await runner.runNextQueuedJob(kind: .transcription)
@@ -333,6 +435,7 @@ public actor SessionCoordinator {
                 break
             }
             guard let job else { break }
+            speechModelMayBeLoaded = true
             summary.transcriptionJobs += 1
             if job.state == .succeeded, let chunkID = job.chunkID,
                let metadata = try? await store.chunkMetadata(id: chunkID) {
@@ -341,16 +444,12 @@ public actor SessionCoordinator {
             notifyAnalysisDidChange()
         }
 
-        // Phase boundary (R1-4): the speech engine's work this pass is
-        // done — release its residency before any text-model work (regroup
-        // boundary reviews + the intelligence drain) so both models are
-        // never co-resident. The unload is gate-serialized (waits out any
-        // in-flight inference); the engine lazily reloads on next use.
-        await transcriber.unloadEngine()
-
         // Phases 2–3 need the GPU-backed text model; when it isn't allowed
-        // (app backgrounded) they run on the next foreground pass.
+        // (app backgrounded) they wait for the next foreground pass. Keep
+        // WhisperKit warm across 1-minute live chunks and unload only once
+        // idle (or on memory/thermal pressure).
         guard await allowsTextModel() else {
+            scheduleSpeechIdleUnloadIfNeeded()
             await emit(.info, "integration.drain_completed", [
                 "transcription_jobs": "\(summary.transcriptionJobs)",
                 "text_phases": "deferred_background",
@@ -358,16 +457,30 @@ public actor SessionCoordinator {
             return summary
         }
 
+        if !isManual, !(await canContinueAutomaticWork()) {
+            return summary
+        }
+
         // Phase 2 — regroup dirty sessions + any session holding ungrouped
-        // segments (crash-convergence: a regroup missed by an earlier pass is
-        // always found again).
+        // segments + stopped sessions (or manual pass) with provisional groups.
         var regroupSet = dirtySessions
         if let ungrouped = try? await store.sessionIDsWithUngroupedSegments() {
             regroupSet.formUnion(ungrouped)
         }
+        if let sessions = try? await store.sessions() {
+            for session in sessions {
+                let groups = (try? await store.conversationGroups(sessionID: session.id)) ?? []
+                if session.state == .stopped, groups.contains(where: \.isProvisional) {
+                    regroupSet.insert(session.id)
+                } else if isManual, !groups.isEmpty {
+                    regroupSet.insert(session.id)
+                }
+            }
+        }
         for sessionID in regroupSet where !Task.isCancelled {
+            if !isManual, !(await canContinueAutomaticWork()) { break }
             do {
-                let enqueued = try await regroup(sessionID: sessionID)
+                let enqueued = try await regroup(sessionID: sessionID, includeProvisional: isManual)
                 summary.regroupedSessions += 1
                 summary.enqueuedIntelligence += enqueued
                 notifyAnalysisDidChange()
@@ -379,8 +492,27 @@ public actor SessionCoordinator {
         }
 
         // Phase 3 — intelligence drain (includes jobs enqueued in phase 2).
+        // Unload WhisperKit ONLY when an intelligence job will actually run
+        // so both models are never co-resident while avoiding per-minute
+        // WhisperKit reloads during live capture.
         let textReady = await intelligence.readiness() == .ready
-        while textReady, summary.intelligenceJobs < maxJobsPerKind, !Task.isCancelled {
+        let hasQueuedIntelligence: Bool
+        if textReady {
+            hasQueuedIntelligence = (try? await store.nextAnalysisJob(kind: .intelligence)) != nil
+        } else {
+            hasQueuedIntelligence = false
+        }
+        if hasQueuedIntelligence {
+            await prepareForTextModelLoad()
+        }
+        while hasQueuedIntelligence, summary.intelligenceJobs < maxJobsPerKind, !Task.isCancelled {
+            if !isManual {
+                guard await canContinueAutomaticWork() else { break }
+                if summary.intelligenceJobs > 0 {
+                    await thermalCooldownIfNeeded()
+                    if Task.isCancelled { break }
+                }
+            }
             let job: AnalysisJob?
             do {
                 job = try await runner.runNextQueuedJob(kind: .intelligence)
@@ -389,14 +521,20 @@ public actor SessionCoordinator {
                 break
             }
             guard job != nil else { break }
+            textModelMayBeLoaded = true
             summary.intelligenceJobs += 1
             notifyAnalysisDidChange()
         }
 
-        // Pass end (R1-4): release the text engine's residency too — a
-        // following pass's transcription phase then starts with no model
-        // resident, keeping peak residency at one engine across passes.
-        await intelligence.unloadEngine()
+        // Pass end (R1-4): release the text engine's residency whenever it
+        // ran so a following transcription phase starts with no text model
+        // resident. If WhisperKit stayed loaded because no text work ran,
+        // schedule an idle unload timer so it frees memory once quiet.
+        if textModelMayBeLoaded {
+            await intelligence.unloadEngine()
+            textModelMayBeLoaded = false
+        }
+        scheduleSpeechIdleUnloadIfNeeded()
 
         await emit(.info, "integration.drain_completed", [
             "transcription_jobs": "\(summary.transcriptionJobs)",
@@ -414,9 +552,101 @@ public actor SessionCoordinator {
         await reconcilePendingTranscriptions()
         _ = await requeueFailedJobs(kind: .transcription, triggerDrain: false)
         _ = await requeueFailedJobs(kind: .intelligence, triggerDrain: false)
-        let summary = await processAnalysisQueue(maxJobsPerKind: maxJobsPerKind)
+        let summary = await processAnalysisQueue(maxJobsPerKind: maxJobsPerKind, isManual: true)
         notifyAnalysisDidChange()
         return summary
+    }
+
+    private func prepareForTextModelLoad() async {
+        await unloadSpeechEngineIfLoaded()
+        textModelMayBeLoaded = true
+    }
+
+    private func unloadSpeechEngineIfLoaded() async {
+        speechIdleUnloadTask?.cancel()
+        speechIdleUnloadTask = nil
+        guard speechModelMayBeLoaded else { return }
+        await transcriber.unloadEngine()
+        speechModelMayBeLoaded = false
+    }
+
+    private func scheduleSpeechIdleUnloadIfNeeded() {
+        speechIdleUnloadTask?.cancel()
+        guard speechModelMayBeLoaded else {
+            speechIdleUnloadTask = nil
+            return
+        }
+        speechIdleUnloadTask = Task(priority: .utility) { [weak self] in
+            try? await Task.sleep(for: Self.speechIdleUnloadDelay)
+            guard !Task.isCancelled else { return }
+            await self?.unloadSpeechIfIdle()
+        }
+    }
+
+    private func unloadSpeechIfIdle() async {
+        guard !drainInFlight, speechModelMayBeLoaded else { return }
+        let hasQueuedSpeech = (try? await store.nextAnalysisJob(kind: .transcription)) != nil
+        guard !hasQueuedSpeech else { return }
+        await transcriber.unloadEngine()
+        speechModelMayBeLoaded = false
+        speechIdleUnloadTask = nil
+    }
+
+    private func handleThermalStateChange() async {
+        let state = ProcessInfo.processInfo.thermalState
+        if state == .serious || state == .critical {
+            await releaseModelMemory(reason: "thermal_throttle")
+        } else {
+            scheduleDrain()
+        }
+    }
+
+    private func handlePowerOrBatteryChange() async {
+        guard !(await shouldPauseForLowPowerMode()) else { return }
+        scheduleDrain()
+    }
+
+    private func canContinueAutomaticWork() async -> Bool {
+        let thermalState = ProcessInfo.processInfo.thermalState
+        if thermalState == .serious || thermalState == .critical {
+            await releaseModelMemory(reason: "thermal_throttle")
+            await emit(.warning, "integration.drain_paused_thermal", [
+                "state": "\(thermalState.rawValue)"
+            ])
+            onDeferredWork()
+            return false
+        }
+        if await shouldPauseForLowPowerMode() {
+            await emit(.info, "integration.drain_paused_low_power", [:])
+            onDeferredWork()
+            return false
+        }
+        return true
+    }
+
+    private func thermalCooldownIfNeeded() async {
+        if ProcessInfo.processInfo.thermalState == .fair {
+            try? await Task.sleep(for: Self.fairThermalCooldown)
+        }
+    }
+
+    private func shouldPauseForLowPowerMode() async -> Bool {
+        guard ProcessInfo.processInfo.isLowPowerModeEnabled else { return false }
+        return !(await isPluggedIn())
+    }
+
+    private func isPluggedIn() async -> Bool {
+        #if os(iOS) && canImport(UIKit)
+        return await MainActor.run {
+            if !UIDevice.current.isBatteryMonitoringEnabled {
+                UIDevice.current.isBatteryMonitoringEnabled = true
+            }
+            let state = UIDevice.current.batteryState
+            return state == .charging || state == .full
+        }
+        #else
+        return true
+        #endif
     }
 
     private func acquireDrainSlot() async {
@@ -448,25 +678,60 @@ public actor SessionCoordinator {
     /// groups. Persisted generated metadata stays verbatim; per-field user
     /// overrides are honored at read time by `effectiveMetadata` — regrouping
     /// never touches override rows.
-    private func regroup(sessionID: UUID) async throws -> Int {
+    private func regroup(sessionID: UUID, includeProvisional: Bool) async throws -> Int {
         let segments = try await store.transcriptSegments(sessionID: sessionID)
         let existing = try await store.conversationGroups(sessionID: sessionID)
-        let proposals = try await intelligence.proposeConversationGroups(
-            sessionID: sessionID, segments: segments
+        let session = try? await store.session(id: sessionID)
+        let isLiveSession = session.map {
+            $0.state == .recording || $0.state == .paused || $0.state == .interrupted
+        } ?? false
+        let allowModelRefinement = includeProvisional || !isLiveSession
+
+        var proposals = try await intelligence.proposeConversationGroups(
+            sessionID: sessionID,
+            segments: segments,
+            allowModelRefinement: allowModelRefinement,
+            beforeModelLoad: { [weak self] in
+                await self?.prepareForTextModelLoad()
+            }
         )
-        let plan = ConversationRegrouping.plan(proposals: proposals, existing: existing)
+        if session?.state == .stopped {
+            for index in proposals.indices {
+                proposals[index].isProvisional = false
+            }
+        }
+        let plan = ConversationRegrouping.plan(
+            proposals: proposals,
+            existing: existing,
+            includeProvisional: includeProvisional
+        )
         for id in plan.disbandedIDs {
             try await store.disbandConversationGroup(conversationID: id)
         }
         for group in plan.upserts {
             try await store.upsertConversationGroup(group)
         }
+        var enqueuedIDs = Set<UUID>()
         for conversationID in plan.intelligenceTargets {
             try await store.enqueueAnalysisJob(
                 AnalysisJob(kind: .intelligence, conversationID: conversationID)
             )
+            enqueuedIDs.insert(conversationID)
         }
-        return plan.intelligenceTargets.count
+        if includeProvisional {
+            // Manual processing also fills in any settled group that never
+            // received metadata (e.g., settled before the text model installed).
+            let currentGroups = try await store.conversationGroups(sessionID: sessionID)
+            for group in currentGroups where !enqueuedIDs.contains(group.id) {
+                if try await store.generatedMetadata(conversationID: group.id) == nil {
+                    try await store.enqueueAnalysisJob(
+                        AnalysisJob(kind: .intelligence, conversationID: group.id)
+                    )
+                    enqueuedIDs.insert(group.id)
+                }
+            }
+        }
+        return enqueuedIDs.count
     }
 
     /// Restart/crash safety net: enqueues a transcription job for every
@@ -537,7 +802,7 @@ public actor SessionCoordinator {
             return
         }
         drainScheduled = true
-        Task {
+        Task(priority: .utility) {
             guard await self.canDrainNow() else {
                 self.finishDeferredDrain()
                 return

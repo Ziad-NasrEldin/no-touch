@@ -64,7 +64,7 @@ public final class AVChunkRecorder: NSObject, CaptureEngine, AVAudioRecorderDele
             AVSampleRateKey: 16_000,
             AVNumberOfChannelsKey: 1,
             AVEncoderBitRateKey: 32_000,
-            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
+            AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue
         ]
     }
 

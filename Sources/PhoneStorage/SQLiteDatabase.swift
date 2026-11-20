@@ -107,14 +107,27 @@ final class ArchiveDatabase {
         }
     }
 
-    /// Returns the first row. No `LIMIT` suffix is appended — that syntax is
-    /// illegal on `PRAGMA` statements, which this layer also runs.
+    /// Returns the first row by stepping once. No `LIMIT` suffix is appended —
+    /// that syntax is illegal on `PRAGMA` statements, which this layer also runs.
     func querySingle<T>(
         _ sql: String,
         _ params: [SQLiteValue] = [],
         row: (OpaquePointer) throws -> T
     ) throws -> T? {
-        try query(sql, params, row: row).first
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw RecorderError.storageFailure
+        }
+        defer { sqlite3_finalize(statement) }
+        try bind(params, to: statement)
+        let step = sqlite3_step(statement)
+        if step == SQLITE_ROW {
+            return try row(statement)
+        } else if step == SQLITE_DONE {
+            return nil
+        } else {
+            throw RecorderError.storageFailure
+        }
     }
 
     func scalarInt(_ sql: String, _ params: [SQLiteValue] = []) throws -> Int64 {

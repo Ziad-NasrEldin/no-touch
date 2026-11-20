@@ -512,7 +512,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = 377QC32T9T;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Apps/PhoneRecorderApp/Info.plist;
@@ -535,7 +535,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = 377QC32T9T;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Apps/PhoneRecorderApp/Info.plist;
@@ -558,7 +558,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = 377QC32T9T;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Apps/WatchRecorderApp/Info.plist;
@@ -582,7 +582,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = 377QC32T9T;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Apps/WatchRecorderApp/Info.plist;
@@ -605,7 +605,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = 377QC32T9T;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Apps/RecorderWidgets/Info.plist;
@@ -629,7 +629,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = 377QC32T9T;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Apps/RecorderWidgets/Info.plist;

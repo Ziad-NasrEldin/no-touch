@@ -275,17 +275,32 @@ public enum MetadataResponseParser {
         )
     }
 
+    /// Strips any Qwen3/reasoning `<think>...</think>` chain-of-thought blocks
+    /// (including an unclosed trailing `<think>` block) before JSON extraction.
+    public static func stripThinkingBlocks(from raw: String) -> String {
+        var cleaned = raw.replacingOccurrences(
+            of: "(?is)<think>.*?</think>",
+            with: "",
+            options: .regularExpression
+        )
+        if let openThink = cleaned.range(of: "<think>", options: .caseInsensitive) {
+            cleaned = String(cleaned[..<openThink.lowerBound])
+        }
+        return cleaned
+    }
+
     /// Finds the first balanced `{…}` JSON object in the raw output — lenient
     /// about model prologue/epilogue but strict about the object itself.
     private static func extractJSONObject(from raw: String) -> Data? {
-        guard let open = raw.firstIndex(of: "{") else { return nil }
+        let stripped = stripThinkingBlocks(from: raw)
+        guard let open = stripped.firstIndex(of: "{") else { return nil }
         var depth = 0
         var inString = false
         var escaped = false
         var end: String.Index?
         var index = open
-        while index < raw.endIndex {
-            let c = raw[index]
+        while index < stripped.endIndex {
+            let c = stripped[index]
             if inString {
                 if escaped { escaped = false }
                 else if c == "\\" { escaped = true }
@@ -298,10 +313,10 @@ public enum MetadataResponseParser {
                     if depth == 0 { end = index; break }
                 }
             }
-            index = raw.index(after: index)
+            index = stripped.index(after: index)
         }
         guard let end else { return nil }
-        return Data(String(raw[open...end]).utf8)
+        return Data(String(stripped[open...end]).utf8)
     }
 
     private static func dedupe(_ refs: [SourcePassageReference]) -> [SourcePassageReference] {

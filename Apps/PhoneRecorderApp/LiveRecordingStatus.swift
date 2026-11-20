@@ -22,6 +22,8 @@ final class LiveRecordingStatus: ObservableObject {
     private weak var coordinator: SessionCoordinator?
     private weak var phoneCapture: PhoneCaptureService?
     private nonisolated(unsafe) var observers: [NSObjectProtocol] = []
+    private nonisolated(unsafe) var stalenessTask: Task<Void, Never>?
+    private static let keepAliveStalenessTimeout: TimeInterval = 5 * 60
     /// ID of the Live Activity we own (activities are looked up by ID so
     /// the non-Sendable `Activity` never crosses isolation boundaries).
     private var activityID: String?
@@ -58,6 +60,7 @@ final class LiveRecordingStatus: ObservableObject {
     }
 
     deinit {
+        stalenessTask?.cancel()
         for observer in observers {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -86,12 +89,19 @@ final class LiveRecordingStatus: ObservableObject {
 
         let resolvedSource: RecordingActivityAttributes.ContentState.Source =
             (chosen.id == phoneSessionID) ? .phone : .watch
-        await apply(chosen, source: resolvedSource)
+        let heardAt: Date
+        if let existing = lastHeardAt, session?.id == chosen.id {
+            heardAt = max(existing, chosen.lastConfirmedCaptureAt ?? chosen.startedAt ?? .distantPast)
+        } else {
+            heardAt = chosen.lastConfirmedCaptureAt ?? chosen.startedAt ?? .distantPast
+        }
+        await apply(chosen, source: resolvedSource, heardAt: heardAt)
     }
 
     private func apply(
         _ snapshot: RecordingSession,
-        source incomingSource: RecordingActivityAttributes.ContentState.Source
+        source incomingSource: RecordingActivityAttributes.ContentState.Source,
+        heardAt: Date = Date()
     ) async {
         // Do not let a stopped/idle snapshot from one device clobber a
         // different currently-live session on the other device.
@@ -104,7 +114,7 @@ final class LiveRecordingStatus: ObservableObject {
         if session?.id != snapshot.id { clipCount = 0 }
         session = snapshot
         source = incomingSource
-        lastHeardAt = Date()
+        lastHeardAt = heardAt
         if let coordinator {
             clipCount = await coordinator.receivedChunks(sessionID: snapshot.id).count
         }
@@ -150,14 +160,29 @@ final class LiveRecordingStatus: ObservableObject {
 
     private func syncActivity() async {
         // BackgroundKeepAlive uses a silent `.playback` audio engine to keep
-        // the iPhone awake while the Apple Watch records. When the iPhone is
-        // recording locally, its own `.record` session keeps the app alive —
-        // starting BackgroundKeepAlive would clobber `.record` and disrupt capture.
-        let phoneIsRecording = (await phoneCapture?.currentSession()?.state) == .recording
-        if isLive && source == .watch && !phoneIsRecording {
-            BackgroundKeepAlive.shared.start()
+        // the iPhone awake ONLY while the Apple Watch is actively `.recording`
+        // (never `.paused` or `.interrupted`), no iPhone local session is live,
+        // and we have heard from the Watch within the staleness window.
+        let phoneState = await phoneCapture?.currentSession()?.state
+        let phoneHasLiveSession = phoneState.map(Self.isSessionLive) ?? false
+        let remainingFreshness: TimeInterval
+        if let heard = lastHeardAt {
+            remainingFreshness = Self.keepAliveStalenessTimeout - Date().timeIntervalSince(heard)
         } else {
-            BackgroundKeepAlive.shared.stop()
+            remainingFreshness = -1
+        }
+        let shouldKeepAlive = session?.state == .recording
+            && source == .watch
+            && !phoneHasLiveSession
+            && remainingFreshness > 0
+
+        if shouldKeepAlive {
+            BackgroundKeepAlive.shared.start()
+            scheduleStalenessTimeout(after: remainingFreshness)
+        } else {
+            stalenessTask?.cancel()
+            stalenessTask = nil
+            BackgroundKeepAlive.shared.stop(deactivateSession: !phoneHasLiveSession)
         }
         guard let session, let state = contentState else { return }
         let content = ActivityContent(state: state, staleDate: Date().addingTimeInterval(15 * 60))
@@ -188,6 +213,16 @@ final class LiveRecordingStatus: ObservableObject {
         }
     }
 
+    private func scheduleStalenessTimeout(after delay: TimeInterval) {
+        stalenessTask?.cancel()
+        let clampedDelay = max(1, delay)
+        stalenessTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(clampedDelay))
+            guard !Task.isCancelled, let self else { return }
+            await self.syncActivity()
+        }
+    }
+
     private nonisolated static func update(
         id: String, content: ActivityContent<RecordingActivityAttributes.ContentState>
     ) async {
@@ -209,7 +244,6 @@ final class LiveRecordingStatus: ObservableObject {
 /// iPhone is recording (or paused/interrupted).
 struct LiveRecordingBanner: View {
     @ObservedObject var status: LiveRecordingStatus
-    @State private var pulse = false
 
     var body: some View {
         if let session = status.session, status.isLive {
@@ -218,17 +252,8 @@ struct LiveRecordingBanner: View {
                     Circle()
                         .fill(tint.opacity(0.25))
                         .frame(width: 34, height: 34)
-                        .scaleEffect(pulse && session.state == .recording ? 1.25 : 1)
-                        .animation(
-                            session.state == .recording
-                                ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
-                                : .default,
-                            value: pulse
-                        )
                     Image(systemName: symbol(session.state)).foregroundStyle(tint)
                 }
-                .onAppear { pulse = true }
-                .onDisappear { pulse = false }
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(title(session.state)) on \(status.source.deviceName)")
                         .font(.subheadline.weight(.semibold))

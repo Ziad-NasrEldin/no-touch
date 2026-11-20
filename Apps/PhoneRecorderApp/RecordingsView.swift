@@ -61,6 +61,12 @@ final class RecordingsLibrary: ObservableObject {
     @Published private(set) var days: [DaySection] = []
     @Published private(set) var isLoading = false
 
+    private nonisolated(unsafe) var loadTask: Task<Void, Never>?
+
+    deinit {
+        loadTask?.cancel()
+    }
+
     func recording(id: UUID) -> RecordingItem? {
         for day in days {
             if let match = day.recordings.first(where: { $0.id == id }) {
@@ -79,8 +85,30 @@ final class RecordingsLibrary: ObservableObject {
         return nil
     }
 
+    /// Debounced, coalesced reload triggered by live notification bursts;
+    /// cancels any previous in-flight load before starting a fresh one.
+    func scheduleLoad(from coordinator: SessionCoordinator?, debounceMilliseconds: UInt64 = 150) {
+        loadTask?.cancel()
+        loadTask = Task { @MainActor [weak self] in
+            if debounceMilliseconds > 0 {
+                try? await Task.sleep(for: .milliseconds(debounceMilliseconds))
+            }
+            guard !Task.isCancelled else { return }
+            await self?.performLoad(from: coordinator)
+        }
+    }
+
     func load(from coordinator: SessionCoordinator?) async {
-        guard let coordinator else { return }
+        loadTask?.cancel()
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            await self?.performLoad(from: coordinator)
+        }
+        loadTask = task
+        await task.value
+    }
+
+    private func performLoad(from coordinator: SessionCoordinator?) async {
+        guard let coordinator, !Task.isCancelled else { return }
         isLoading = true
         defer { isLoading = false }
         let store = coordinator.archiveStore()
@@ -88,9 +116,11 @@ final class RecordingsLibrary: ObservableObject {
 
         var sessionIDs = Set((try? await store.sessionIDsWithStoredChunks()) ?? [])
         for session in (try? await store.sessions()) ?? [] { sessionIDs.insert(session.id) }
+        guard !Task.isCancelled else { return }
 
         var byDay: [Date: DaySection] = [:]
         for sessionID in sessionIDs {
+            guard !Task.isCancelled else { return }
             let chunks = await coordinator.receivedChunks(sessionID: sessionID)
             let chunkByID = Dictionary(uniqueKeysWithValues: chunks.map { ($0.id, $0) })
             let segments = (try? await store.transcriptSegments(sessionID: sessionID)) ?? []
@@ -195,6 +225,7 @@ final class RecordingsLibrary: ObservableObject {
             }
         }
 
+        guard !Task.isCancelled else { return }
         days = byDay.values
             .map { section in
                 var s = section
@@ -208,6 +239,14 @@ final class RecordingsLibrary: ObservableObject {
 
 // MARK: - Playback
 
+/// High-frequency playback clock isolated from `ChunkPlayer` so 5 Hz time
+/// updates only invalidate `MiniPlayerBar` and the playback scrubber — never
+/// the full `RecordingsView` list or detail views.
+@MainActor
+final class PlaybackProgress: ObservableObject {
+    @Published var currentTime: TimeInterval = 0
+}
+
 @MainActor
 final class ChunkPlayer: ObservableObject {
     enum PlaybackState: Equatable {
@@ -217,15 +256,17 @@ final class ChunkPlayer: ObservableObject {
         case paused
     }
 
+    let progress = PlaybackProgress()
+
     @Published private(set) var activeID: UUID?
     @Published private(set) var state: PlaybackState = .idle
     @Published private(set) var activeTitle: String = ""
-    @Published private(set) var currentTime: TimeInterval = 0
     @Published private(set) var totalDuration: TimeInterval = 0
     @Published private(set) var currentClipIndex: Int = 0
     @Published private(set) var clipCount: Int = 0
     @Published private(set) var errorMessage: String?
 
+    var currentTime: TimeInterval { progress.currentTime }
     var playingID: UUID? { state == .playing ? activeID : nil }
 
     func isActive(_ id: UUID) -> Bool { activeID == id && state != .idle }
@@ -234,20 +275,34 @@ final class ChunkPlayer: ObservableObject {
     func isLoading(_ id: UUID) -> Bool { activeID == id && state == .loading }
 
     private var loadGeneration: UInt64 = 0
-    private var player: AVQueuePlayer?
+    private nonisolated(unsafe) var player: AVQueuePlayer?
     private var clipURLs: [URL] = []
     private var clipDurations: [TimeInterval] = []
     private var clipStartOffsets: [TimeInterval] = []
     private var itemIndexByID: [ObjectIdentifier: Int] = [:]
-    private var timeObserver: Any?
-    private var currentItemKVO: NSKeyValueObservation?
-    private var itemStatusKVO: NSKeyValueObservation?
-    private var timeControlKVO: NSKeyValueObservation?
-    private var notificationObservers: [NSObjectProtocol] = []
+    private nonisolated(unsafe) var timeObserver: Any?
+    private nonisolated(unsafe) var currentItemKVO: NSKeyValueObservation?
+    private nonisolated(unsafe) var itemStatusKVO: NSKeyValueObservation?
+    private nonisolated(unsafe) var timeControlKVO: NSKeyValueObservation?
+    private nonisolated(unsafe) var notificationObservers: [NSObjectProtocol] = []
     private var isScrubbing = false
     /// Returns true when local iPhone capture owns the audio session, so
     /// playback refuses to clobber `.record` instead of interrupting capture.
     var isPhoneRecordingProvider: (() -> Bool)?
+
+    deinit {
+        if let player, let timeObserver {
+            player.removeTimeObserver(timeObserver)
+        }
+        currentItemKVO?.invalidate()
+        itemStatusKVO?.invalidate()
+        timeControlKVO?.invalidate()
+        for observer in notificationObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        player?.pause()
+        player?.removeAllItems()
+    }
 
     func togglePlayPause(for item: RecordingItem, coordinator: SessionCoordinator?) async {
         await togglePlayPause(
@@ -294,14 +349,14 @@ final class ChunkPlayer: ObservableObject {
             }
         }
 
-        stop(clearError: true)
+        stop(clearError: true, deactivateSession: false)
         loadGeneration &+= 1
         let generation = loadGeneration
 
         activeID = id
         activeTitle = title
         state = .loading
-        currentTime = 0
+        progress.currentTime = 0
         totalDuration = max(0, fallbackDuration)
         currentClipIndex = 0
         clipCount = chunkIDs.count
@@ -376,7 +431,7 @@ final class ChunkPlayer: ObservableObject {
         clipCount = urls.count
         totalDuration = running > 0 ? running : max(0, fallbackDuration)
         currentClipIndex = 0
-        currentTime = 0
+        progress.currentTime = 0
 
         buildQueue(startingAt: 0, localOffset: 0, autoPlay: true)
     }
@@ -418,7 +473,7 @@ final class ChunkPlayer: ObservableObject {
     }
 
     func scrub(to seconds: TimeInterval) {
-        currentTime = min(max(0, seconds), totalDuration)
+        progress.currentTime = min(max(0, seconds), totalDuration)
     }
 
     func endScrubbing(at seconds: TimeInterval) {
@@ -447,7 +502,7 @@ final class ChunkPlayer: ObservableObject {
             }
         }
         let localOffset = max(0, clamped - clipStartOffsets[targetIndex])
-        currentTime = clamped
+        progress.currentTime = clamped
 
         if targetIndex == currentClipIndex, let player, player.currentItem != nil {
             let cm = CMTime(seconds: localOffset, preferredTimescale: 600)
@@ -461,13 +516,13 @@ final class ChunkPlayer: ObservableObject {
         errorMessage = nil
     }
 
-    func stop(clearError: Bool = true) {
+    func stop(clearError: Bool = true, deactivateSession: Bool = true) {
         loadGeneration &+= 1
         tearDownPlayer()
         activeID = nil
         activeTitle = ""
         state = .idle
-        currentTime = 0
+        progress.currentTime = 0
         totalDuration = 0
         currentClipIndex = 0
         clipCount = 0
@@ -476,7 +531,7 @@ final class ChunkPlayer: ObservableObject {
         clipStartOffsets = []
         isScrubbing = false
         if clearError { errorMessage = nil }
-        BackgroundKeepAlive.shared.resumeIfNeeded()
+        releaseAudioSessionIfAppropriate(deactivateSession: deactivateSession)
     }
 
     // MARK: - Internals
@@ -486,7 +541,7 @@ final class ChunkPlayer: ObservableObject {
         activeID = nil
         activeTitle = ""
         state = .idle
-        currentTime = 0
+        progress.currentTime = 0
         totalDuration = 0
         currentClipIndex = 0
         clipCount = 0
@@ -495,7 +550,15 @@ final class ChunkPlayer: ObservableObject {
         clipStartOffsets = []
         isScrubbing = false
         errorMessage = message
-        BackgroundKeepAlive.shared.resumeIfNeeded()
+        releaseAudioSessionIfAppropriate(deactivateSession: true)
+    }
+
+    private func releaseAudioSessionIfAppropriate(deactivateSession: Bool) {
+        if BackgroundKeepAlive.shared.isActive {
+            BackgroundKeepAlive.shared.resumeIfNeeded()
+        } else if deactivateSession, isPhoneRecordingProvider?() != true {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
     }
 
     private func configureAudioSessionForPlayback() throws {
@@ -657,7 +720,7 @@ final class ChunkPlayer: ObservableObject {
     private func handlePeriodicTime(_ localSeconds: Double) {
         guard !isScrubbing, state != .idle, localSeconds.isFinite else { return }
         let base = currentClipIndex < clipStartOffsets.count ? clipStartOffsets[currentClipIndex] : 0
-        currentTime = min(max(0, base + max(0, localSeconds)), max(totalDuration, base + max(0, localSeconds)))
+        progress.currentTime = min(max(0, base + max(0, localSeconds)), max(totalDuration, base + max(0, localSeconds)))
     }
 
     private func handleItemEnded(itemID: ObjectIdentifier?) {
@@ -684,15 +747,16 @@ final class ChunkPlayer: ObservableObject {
 
 struct RecordingsView: View {
     @ObservedObject var model: PhoneRecorderModel
+    @ObservedObject var live: LiveRecordingStatus
     @StateObject private var library = RecordingsLibrary()
     @StateObject private var player = ChunkPlayer()
 
     var body: some View {
         NavigationStack {
             List {
-                if model.live.isLive {
+                if live.isLive {
                     Section {
-                        LiveRecordingBanner(status: model.live)
+                        LiveRecordingBanner(status: live)
                             .listRowInsets(EdgeInsets())
                             .listRowBackground(Color.clear)
                     }
@@ -795,18 +859,18 @@ struct RecordingsView: View {
             }
             .safeAreaInset(edge: .bottom) {
                 if player.state != .idle {
-                    MiniPlayerBar(player: player)
+                    MiniPlayerBar(player: player, progress: player.progress)
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: RecorderLiveNotifications.chunkDidArrive)) { _ in
-                Task { await library.load(from: model.coordinator) }
+                library.scheduleLoad(from: model.coordinator)
             }
             .onReceive(NotificationCenter.default.publisher(for: RecorderLiveNotifications.analysisDidChange)) { _ in
-                Task { await library.load(from: model.coordinator) }
+                library.scheduleLoad(from: model.coordinator)
             }
             .onChange(of: model.isPhoneRecording) { _, recording in
                 if recording && player.state != .idle {
-                    player.stop(clearError: true)
+                    player.stop(clearError: true, deactivateSession: false)
                 }
             }
             .navigationTitle("Recordings")
@@ -814,10 +878,6 @@ struct RecordingsView: View {
             .task {
                 player.isPhoneRecordingProvider = { [weak model] in model?.isPhoneRecording ?? false }
                 await reload()
-            }
-            .onAppear {
-                player.isPhoneRecordingProvider = { [weak model] in model?.isPhoneRecording ?? false }
-                Task { await library.load(from: model.coordinator) }
             }
         }
     }
@@ -834,12 +894,27 @@ struct RecordingsView: View {
         return day.formatted(.dateTime.weekday(.wide).day().month(.wide).year())
     }
 
+    @MainActor
+    private static let shortDurationFormatter: DateComponentsFormatter = {
+        let f = DateComponentsFormatter()
+        f.allowedUnits = [.minute, .second]
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+
+    @MainActor
+    private static let longDurationFormatter: DateComponentsFormatter = {
+        let f = DateComponentsFormatter()
+        f.allowedUnits = [.hour, .minute]
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+
+    @MainActor
     static func duration(_ seconds: TimeInterval) -> String {
         let clamped = max(0, seconds)
         if clamped < 1 { return "0s" }
-        let f = DateComponentsFormatter()
-        f.allowedUnits = clamped >= 3600 ? [.hour, .minute] : [.minute, .second]
-        f.unitsStyle = .abbreviated
+        let f = clamped >= 3600 ? longDurationFormatter : shortDurationFormatter
         return f.string(from: clamped) ?? "\(Int(clamped))s"
     }
 
@@ -857,6 +932,7 @@ struct RecordingsView: View {
 
 private struct MiniPlayerBar: View {
     @ObservedObject var player: ChunkPlayer
+    @ObservedObject var progress: PlaybackProgress
 
     var body: some View {
         VStack(spacing: 0) {
@@ -884,7 +960,7 @@ private struct MiniPlayerBar: View {
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                     HStack(spacing: 6) {
-                        Text("\(RecordingsView.clock(player.currentTime)) / \(RecordingsView.clock(player.totalDuration))")
+                        Text("\(RecordingsView.clock(progress.currentTime)) / \(RecordingsView.clock(player.totalDuration))")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                         if player.clipCount > 1 {
@@ -975,6 +1051,55 @@ private struct ConversationRow: View {
     }
 }
 
+private struct PlaybackScrubberView: View {
+    let isThisItem: Bool
+    let displayedTotal: TimeInterval
+    let clipCount: Int
+    let currentClipIndex: Int
+    let player: ChunkPlayer
+    @ObservedObject var progress: PlaybackProgress
+
+    private var displayedCurrent: TimeInterval { isThisItem ? progress.currentTime : 0 }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Slider(
+                value: Binding(
+                    get: { min(displayedCurrent, displayedTotal) },
+                    set: { newVal in
+                        if isThisItem {
+                            player.scrub(to: newVal)
+                        }
+                    }
+                ),
+                in: 0...max(displayedTotal, 0.1),
+                onEditingChanged: { editing in
+                    guard isThisItem else { return }
+                    if editing {
+                        player.beginScrubbing()
+                    } else {
+                        player.endScrubbing(at: progress.currentTime)
+                    }
+                }
+            )
+            .disabled(!isThisItem)
+
+            HStack {
+                Text(RecordingsView.clock(displayedCurrent))
+                Spacer()
+                if isThisItem && clipCount > 1 {
+                    Text("Clip \(currentClipIndex + 1) of \(clipCount)")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                Text(RecordingsView.clock(displayedTotal))
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+        }
+    }
+}
+
 private struct AudioPlaybackSection: View {
     let itemID: UUID
     let title: String
@@ -985,46 +1110,18 @@ private struct AudioPlaybackSection: View {
 
     private var isThisItem: Bool { player.isActive(itemID) }
     private var displayedTotal: TimeInterval { isThisItem && player.totalDuration > 0 ? player.totalDuration : max(0, duration) }
-    private var displayedCurrent: TimeInterval { isThisItem ? player.currentTime : 0 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if displayedTotal > 0 {
-                VStack(spacing: 4) {
-                    Slider(
-                        value: Binding(
-                            get: { min(displayedCurrent, displayedTotal) },
-                            set: { newVal in
-                                if isThisItem {
-                                    player.scrub(to: newVal)
-                                }
-                            }
-                        ),
-                        in: 0...max(displayedTotal, 0.1),
-                        onEditingChanged: { editing in
-                            guard isThisItem else { return }
-                            if editing {
-                                player.beginScrubbing()
-                            } else {
-                                player.endScrubbing(at: player.currentTime)
-                            }
-                        }
-                    )
-                    .disabled(!isThisItem)
-
-                    HStack {
-                        Text(RecordingsView.clock(displayedCurrent))
-                        Spacer()
-                        if isThisItem && player.clipCount > 1 {
-                            Text("Clip \(player.currentClipIndex + 1) of \(player.clipCount)")
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                        }
-                        Text(RecordingsView.clock(displayedTotal))
-                    }
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                }
+                PlaybackScrubberView(
+                    isThisItem: isThisItem,
+                    displayedTotal: displayedTotal,
+                    clipCount: player.clipCount,
+                    currentClipIndex: player.currentClipIndex,
+                    player: player,
+                    progress: player.progress
+                )
             }
 
             HStack(spacing: 12) {

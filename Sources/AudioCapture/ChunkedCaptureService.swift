@@ -82,6 +82,9 @@ public actor ChunkedCaptureService: WatchCaptureServiceProtocol {
     private var engine: (any CaptureEngine)?
     private var activeChunkURL: URL?
     private var loopTask: Task<Void, Never>?
+    private var recoveryTask: Task<Void, Never>?
+    private var isActivating = false
+    private var activationGeneration: UInt64 = 0
     private var inFlightFinalizations: [UUID: Task<Void, Never>] = [:]
     /// Assigned inside the nonisolated initializer; touched only by
     /// init/deinit afterwards, so bypassing isolation is race-free.
@@ -166,6 +169,7 @@ public actor ChunkedCaptureService: WatchCaptureServiceProtocol {
 
     deinit {
         loopTask?.cancel()
+        recoveryTask?.cancel()
         eventTask?.cancel()
         interruptionTask?.cancel()
     }
@@ -210,6 +214,8 @@ public actor ChunkedCaptureService: WatchCaptureServiceProtocol {
         guard var current = session, current.state == .recording else {
             throw RecorderError.invalidState(session?.state ?? .idle)
         }
+        activationGeneration &+= 1
+        cancelRecovery()
         sealActiveChunk(endedAt: Date(), via: "pause")
         haltLoop()
         PlatformCaptureEngine.deactivateAudioSession()
@@ -231,6 +237,8 @@ public actor ChunkedCaptureService: WatchCaptureServiceProtocol {
         guard var current = session, current.state != .idle, current.state != .stopped else {
             throw RecorderError.invalidState(session?.state ?? .idle)
         }
+        activationGeneration &+= 1
+        cancelRecovery()
         let now = Date()
         sealActiveChunk(endedAt: now, via: "stop")
         haltLoop()
@@ -310,15 +318,39 @@ public actor ChunkedCaptureService: WatchCaptureServiceProtocol {
 
     /// Permission → audio session → chunk engine. Any failure marks the
     /// session interrupted with an honest reason instead of pretending.
+    /// Reentrancy-guarded across suspension points so concurrent callers
+    /// cannot start two recorders and leak the first.
     private func activateAndRecord(now: Date, via: String) async throws {
+        guard !isActivating else {
+            throw RecorderError.invalidState(session?.state ?? .idle)
+        }
+        isActivating = true
+        defer { isActivating = false }
+        cancelRecovery()
+        let generation = activationGeneration
+
         do {
             try await ensureMicrophonePermission()
+            guard generation == activationGeneration else {
+                throw RecorderError.invalidState(session?.state ?? .idle)
+            }
             if let beforeActivateAudioSession {
                 await beforeActivateAudioSession()
+            }
+            guard generation == activationGeneration else {
+                throw RecorderError.invalidState(session?.state ?? .idle)
+            }
+            if let existingEngine = engine {
+                existingEngine.stop()
+                engine = nil
+                activeChunkURL = nil
             }
             try PlatformCaptureEngine.activateAudioSession()
             try beginChunk(at: now)
         } catch {
+            // If a pause/stop superseded this activation while suspended, do
+            // not overwrite the newer session state with `.interrupted`.
+            guard generation == activationGeneration else { throw error }
             let reason = failureReason(for: error)
             if var s = session {
                 s.state = .interrupted
@@ -426,7 +458,7 @@ public actor ChunkedCaptureService: WatchCaptureServiceProtocol {
                 s.lastConfirmedCaptureAt = Date()
                 session = s
             }
-            persist()
+            persistSession()
         }
         if ContinuousClock.now >= chunkEndsAt {
             rotateChunk()
@@ -581,7 +613,8 @@ public actor ChunkedCaptureService: WatchCaptureServiceProtocol {
                 s.lastConfirmedCaptureAt = wallEnd
                 session = s
             }
-            persist()
+            persistSession()
+            persistManifest()
             diagnostics.emit(.capture, name: "chunk-finalized", payload: [
                 "via": via,
                 "seq": "\(integrity.sequenceNumber)",
@@ -644,8 +677,9 @@ public actor ChunkedCaptureService: WatchCaptureServiceProtocol {
             return
         }
         wasRecordingBeforeInterruption = false
-        Task { [weak self] in
-            guard let self else { return }
+        cancelRecovery()
+        recoveryTask = Task { [weak self] in
+            guard let self, !Task.isCancelled else { return }
             do {
                 try await self.activateAndRecord(now: Date(), via: "auto-resume")
             } catch {
@@ -676,18 +710,27 @@ public actor ChunkedCaptureService: WatchCaptureServiceProtocol {
     /// only if still interrupted — spec allows recovery "when the system
     /// allows it"; a user who pauses/stops in the meantime cancels it.
     private func scheduleAutoRecovery(via: String) {
-        Task { [weak self] in
+        cancelRecovery()
+        recoveryTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
             await self?.autoRecoverIfInterrupted(via: via)
         }
     }
 
+    private func cancelRecovery() {
+        recoveryTask?.cancel()
+        recoveryTask = nil
+    }
+
     private func autoRecoverIfInterrupted(via: String) async {
-        guard session?.state == .interrupted else { return }
+        guard !Task.isCancelled, session?.state == .interrupted else { return }
         try? await activateAndRecord(now: Date(), via: via)
     }
 
     private func beginInterruption(at now: Date, reason: FailureReason, detail: String) {
+        activationGeneration &+= 1
+        cancelRecovery()
         haltLoop()
         if var s = session {
             s.state = .interrupted
@@ -782,17 +825,26 @@ public actor ChunkedCaptureService: WatchCaptureServiceProtocol {
     // MARK: - Persistence / helpers
 
     private func commit() {
-        persist()
+        persistSession()
         if let s = session { broadcaster.yield(s) }
     }
 
-    private func persist() {
+    private func persistSession() {
         guard let s = session else { return }
         do {
             try store.save(PersistedCapture(session: s, nextSequence: nextSequence))
-            try store.saveManifest(sessionID: s.id, chunks: finalized)
         } catch {
             diagnostics.emit(.capture, name: "persist-failed", severity: .error,
+                             payload: ["error": "\(error)"])
+        }
+    }
+
+    private func persistManifest() {
+        guard let s = session else { return }
+        do {
+            try store.saveManifest(sessionID: s.id, chunks: finalized)
+        } catch {
+            diagnostics.emit(.capture, name: "persist-manifest-failed", severity: .error,
                              payload: ["error": "\(error)"])
         }
     }
